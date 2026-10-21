@@ -201,7 +201,7 @@ def get_referral_stats(referrer_vk_id: int) -> dict:
         }
 
 
-def get_pending_referrals(limit: int = 5, offset: int = 0) -> tuple[list[dict], int]:
+def get_pending_referrals(limit: int = 4, offset: int = 0) -> tuple[list[dict], int]:
     with get_connection() as conn:
         total = conn.execute(
             """
@@ -294,7 +294,7 @@ def mark_referral_visited(referral_id: int) -> tuple[bool, str, dict | None]:
     return True, f"Визит подтвержден. Бонус {REFERRAL_REWARD_TEXT} начислен.", notify_data
 
 
-def get_active_rewards(limit: int = 5, offset: int = 0) -> tuple[list[dict], int]:
+def get_active_rewards(limit: int = 4, offset: int = 0) -> tuple[list[dict], int]:
     with get_connection() as conn:
         total = conn.execute(
             """

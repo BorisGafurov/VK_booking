@@ -1,17 +1,19 @@
 import json
 import logging
+import math
 from typing import Any
 
 from vkbottle import GroupEventType
 from vkbottle.bot import BotLabeler, Message, MessageEvent
 
 from keyboards.advice import (
+    PAGE_SIZE,
     get_article_detail_keyboard,
     get_product_detail_keyboard,
     get_products_keyboard,
     get_recommendations_hub_keyboard,
 )
-from services.recommendations import get_article, get_product
+from services.recommendations import get_article, get_product, get_products
 
 logger = logging.getLogger(__name__)
 labeler = BotLabeler()
@@ -53,18 +55,40 @@ def get_payload(event: MessageEvent) -> dict[str, Any]:
         "советы по уходу",
         "советы",
         "Советы",
-        "товары",
-        "Товары",
         "/advice",
         "/tips",
         "/care",
-        "/products",
     ]
 )
 async def advice_menu(message: Message):
     await message.answer(
         HUB_TEXT,
         keyboard=get_recommendations_hub_keyboard(),
+    )
+
+
+@labeler.message(
+    text=[
+        "🛍 Проверенные товары на Ozon",
+        "Проверенные товары на Ozon",
+        "проверенные товары на озон",
+        "товары на озон",
+        "товары озон",
+        "товары",
+        "Товары",
+        "озон",
+        "Озон",
+        "ozon",
+        "/products",
+    ]
+)
+async def products_menu_message(message: Message):
+    products = list(get_products().items())
+    total_pages = max(1, math.ceil(len(products) / PAGE_SIZE))
+    text = f"{PRODUCTS_TEXT}\n\n📄 Страница 1 из {total_pages}"
+    await message.answer(
+        text,
+        keyboard=get_products_keyboard(page=0),
     )
 
 
@@ -93,9 +117,13 @@ async def callback_rec_products(event: MessageEvent):
     payload = get_payload(event)
     page = int(payload.get("page", 0))
 
+    products = list(get_products().items())
+    total_pages = max(1, math.ceil(len(products) / PAGE_SIZE))
+    text = f"{PRODUCTS_TEXT}\n\n📄 Страница {page + 1} из {total_pages}"
+
     try:
         await event.edit_message(
-            message=PRODUCTS_TEXT,
+            message=text,
             keyboard=get_products_keyboard(page=page),
         )
     except Exception as e:

@@ -1,8 +1,16 @@
+import re
 from vkbottle import Callback, Keyboard, OpenLink
 
 from services.recommendations import get_articles, get_products
 
-PAGE_SIZE = 5
+PAGE_SIZE = 4
+
+
+def _clean_btn_title(title: str) -> str:
+    """Ensure button label is concise and does not exceed VK 40 chars limit."""
+    if len(title) > 35 and "(" in title:
+        title = re.sub(r"\s*\([A-Za-z /]+\)", "", title).strip()
+    return title[:40]
 
 
 def get_recommendations_hub_keyboard() -> str:
@@ -11,7 +19,7 @@ def get_recommendations_hub_keyboard() -> str:
     kb = Keyboard(inline=True)
 
     for slug, item in articles.items():
-        title = item["title"][:40]
+        title = _clean_btn_title(item["title"])
         kb.add(Callback(title, {"cmd": "art", "slug": slug}))
         kb.row()
 
@@ -25,7 +33,7 @@ def get_articles_keyboard() -> str:
     kb = Keyboard(inline=True)
 
     for slug, item in articles.items():
-        title = item["title"][:40]
+        title = _clean_btn_title(item["title"])
         kb.add(Callback(title, {"cmd": "art", "slug": slug}))
         kb.row()
 
@@ -34,7 +42,7 @@ def get_articles_keyboard() -> str:
 
 
 def get_products_keyboard(page: int = 0) -> str:
-    """Paginated keyboard listing products."""
+    """Paginated keyboard listing products (max 6 rows strictly respected)."""
     products = list(get_products().items())
     total = len(products)
     start = page * PAGE_SIZE
@@ -44,11 +52,11 @@ def get_products_keyboard(page: int = 0) -> str:
     kb = Keyboard(inline=True)
 
     for slug, item in page_items:
-        title = item["title"][:40]
+        title = _clean_btn_title(item["title"])
         kb.add(Callback(title, {"cmd": "prod", "slug": slug, "page": page}))
         kb.row()
 
-    # Pagination controls
+    # Pagination controls row
     nav_row_needed = False
     if page > 0 or end < total:
         if page > 0:
@@ -77,7 +85,7 @@ def get_product_detail_keyboard(links: list[tuple[str, str]], page: int = 0) -> 
     """Keyboard for product details with Ozon OpenLink buttons."""
     kb = Keyboard(inline=True)
 
-    # Add at most 4 direct product links to stay well within VK inline keyboard limits
+    # Add at most 4 direct product links to stay well within VK inline keyboard limits (max 6 rows total)
     for label, url in links[:4]:
         btn_text = f"🛍 {label[:28]} ↗"[:40]
         kb.add(OpenLink(link=url, label=btn_text))
