@@ -3,7 +3,7 @@ from vkbottle import Callback, Keyboard, OpenLink
 
 from services.recommendations import get_articles, get_products
 
-PAGE_SIZE = 4
+PAGE_SIZE = 3
 
 
 def _clean_btn_title(title: str) -> str:

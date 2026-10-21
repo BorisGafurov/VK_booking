@@ -20,7 +20,7 @@ from services.referrals import (
 logger = logging.getLogger(__name__)
 labeler = BotLabeler()
 
-PAGE_SIZE = 4
+PAGE_SIZE = 3
 
 
 def get_payload(event: MessageEvent) -> dict[str, Any]:

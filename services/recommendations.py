@@ -269,6 +269,9 @@ def _find_directory(subpath: str) -> Path | None:
         Path(__file__).resolve().parent.parent / "data" / "recommendations" / subpath,
         Path(__file__).parent.parent / "data" / "recommendations" / subpath,
         Path.cwd() / "data" / "recommendations" / subpath,
+        Path.cwd() / "VK_booking" / "data" / "recommendations" / subpath,
+        Path.cwd() / "bot_VK_booking" / "data" / "recommendations" / subpath,
+        Path("/app/data/recommendations") / subpath,
     ]
     for c in candidates:
         if c.exists() and any(c.glob("*.md")):
