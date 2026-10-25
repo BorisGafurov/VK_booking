@@ -53,6 +53,17 @@ def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
 
+async def safe_event_answer(event: MessageEvent, snackbar: str | None = None) -> None:
+    """Safely answer MessageEvent once, ignoring invalid event_id if already answered or expired."""
+    try:
+        if snackbar:
+            await event.show_snackbar(snackbar)
+        else:
+            await event.send_empty_answer()
+    except Exception:
+        pass
+
+
 def admin_menu_keyboard() -> str:
     kb = Keyboard(inline=True)
     kb.add(Callback("⏳ Ожидают подтверждения", {"cmd": "admin_pending", "offset": 0}))
@@ -395,9 +406,9 @@ async def noop_handler(event: MessageEvent):
     dataclass=MessageEvent,
     func=lambda event: get_payload(event).get("cmd") == "admin_masters",
 )
-async def admin_masters_status_vk(event: MessageEvent):
+async def admin_masters_status_vk(event: MessageEvent, answer_event: bool = True):
     if not is_admin(event.user_id):
-        await event.show_snackbar("Нет доступа.")
+        await safe_event_answer(event, "Нет доступа.")
         return
 
     session = get_active_masters_session()
@@ -430,7 +441,8 @@ async def admin_masters_status_vk(event: MessageEvent):
         await event.edit_message(message=text, keyboard=kb.get_json())
     except Exception as e:
         logger.warning("Error editing masters status: %s", e)
-    await event.send_empty_answer()
+    if answer_event:
+        await safe_event_answer(event)
 
 
 @labeler.raw_event(
@@ -440,7 +452,7 @@ async def admin_masters_status_vk(event: MessageEvent):
 )
 async def admin_masters_request_code_vk(event: MessageEvent):
     if not is_admin(event.user_id):
-        await event.show_snackbar("Нет доступа.")
+        await safe_event_answer(event, "Нет доступа.")
         return
 
     user_id = event.user_id
@@ -454,10 +466,10 @@ async def admin_masters_request_code_vk(event: MessageEvent):
             )
         except Exception as e:
             logger.warning("Error editing msg: %s", e)
-        await event.send_empty_answer()
+        await safe_event_answer(event)
         return
 
-    await event.show_snackbar("Запрашиваю код в Masters...")
+    await safe_event_answer(event, "Запрашиваю код в Masters...")
     success, msg, session_data = request_master_login(phone)
 
     if not success:
@@ -480,7 +492,6 @@ async def admin_masters_request_code_vk(event: MessageEvent):
         )
     except Exception as e:
         logger.warning("Error editing msg: %s", e)
-    await event.send_empty_answer()
 
 
 @labeler.raw_event(
@@ -490,12 +501,12 @@ async def admin_masters_request_code_vk(event: MessageEvent):
 )
 async def admin_masters_sync_now_vk(event: MessageEvent):
     if not is_admin(event.user_id):
-        await event.show_snackbar("Нет доступа.")
+        await safe_event_answer(event, "Нет доступа.")
         return
 
-    await event.show_snackbar("Синхронизирую записи...")
     ok, count, msg = sync_masters_appointments()
-    await event.show_snackbar(msg[:60])
+    await safe_event_answer(event, msg[:60])
+    await admin_masters_status_vk(event, answer_event=False)
 
 
 @labeler.raw_event(
@@ -505,12 +516,12 @@ async def admin_masters_sync_now_vk(event: MessageEvent):
 )
 async def admin_masters_disconnect_vk(event: MessageEvent):
     if not is_admin(event.user_id):
-        await event.show_snackbar("Нет доступа.")
+        await safe_event_answer(event, "Нет доступа.")
         return
 
     disconnect_masters_session()
-    await event.show_snackbar("Синхронизация отключена.")
-    await admin_masters_status_vk(event)
+    await safe_event_answer(event, "Синхронизация отключена.")
+    await admin_masters_status_vk(event, answer_event=False)
 
 
 @labeler.message(func=lambda msg: bool(msg.from_id in pending_master_logins and msg.text and msg.text.strip().isdigit() and len(msg.text.strip()) == 4))
