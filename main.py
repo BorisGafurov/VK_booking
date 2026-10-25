@@ -21,6 +21,7 @@ from handlers.navigation import labeler as navigation_labeler
 from handlers.referrals import labeler as referrals_labeler
 from handlers.start import labeler as start_labeler
 from keyboards.menu import get_main_menu
+from services.reminder_worker import run_reminder_worker
 
 logging.basicConfig(
     level=logging.INFO,
@@ -76,8 +77,12 @@ async def main():
     bot.labeler.load(referrals_labeler)
     bot.labeler.load(fallback_labeler)
 
+    worker_task = asyncio.create_task(run_reminder_worker(bot.api, "vk"))
     logger.info("VK-бот успешно запущен. Нажми Ctrl+C для остановки.")
-    await bot.run_polling()
+    try:
+        await bot.run_polling()
+    finally:
+        worker_task.cancel()
 
 
 if __name__ == "__main__":

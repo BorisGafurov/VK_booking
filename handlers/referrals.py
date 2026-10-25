@@ -7,11 +7,21 @@ from vkbottle import Callback, GroupEventType, Keyboard
 from vkbottle.bot import BotLabeler, Message, MessageEvent
 
 from config import ADMIN_IDS, REFERRAL_REWARD_TEXT
+from services.masters_sync import (
+    confirm_master_login,
+    disconnect_masters_session,
+    get_active_masters_session,
+    pending_master_logins,
+    request_master_login,
+    sync_masters_appointments,
+)
 from services.referrals import (
     build_referral_link,
     get_active_rewards,
     get_pending_referrals,
     get_referral_stats,
+    get_user_phone,
+    is_phone_number,
     mark_referral_visited,
     mark_reward_used,
     save_user,
@@ -45,6 +55,8 @@ def admin_menu_keyboard() -> str:
     kb.add(Callback("⏳ Ожидают подтверждения", {"cmd": "admin_pending", "offset": 0}))
     kb.row()
     kb.add(Callback("💰 Активные бонусы", {"cmd": "admin_rewards", "offset": 0}))
+    kb.row()
+    kb.add(Callback("🔄 Синхронизация Masters", {"cmd": "admin_masters"}))
     return kb.get_json()
 
 
@@ -371,3 +383,168 @@ async def use_reward(event: MessageEvent):
 )
 async def noop_handler(event: MessageEvent):
     await event.send_empty_answer()
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_masters",
+)
+async def admin_masters_status_vk(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    session = get_active_masters_session()
+    kb = Keyboard(inline=True)
+    if session:
+        text = (
+            "✅ Синхронизация Masters подключена\n\n"
+            f"📱 Номер мастера: {session['master_phone']}\n"
+            "Записи из Masters синхронизируются автоматически, "
+            "а клиенты получают напоминания о стрижке накануне вечером и за 2 часа.\n\n"
+            "Можно запустить принудительную синхронизацию прямо сейчас:"
+        )
+        kb.add(Callback("🔄 Синхронизировать сейчас", {"cmd": "admin_masters_sync"}))
+        kb.row()
+        kb.add(Callback("🚪 Отключить аккаунт Masters", {"cmd": "admin_masters_logout"}))
+        kb.row()
+        kb.add(Callback("⬅️ Меню админки", {"cmd": "admin_menu"}))
+    else:
+        text = (
+            "🔗 Подключение аккаунта Masters\n\n"
+            "Бот может автоматически забирать все записи из твоего личного кабинета Masters "
+            "и бесплатно рассылать клиентам напоминания о визите накануне вечером и за 2 часа.\n\n"
+            "Нажми кнопку ниже, чтобы отправить код подтверждения:"
+        )
+        kb.add(Callback("📲 Запросить СМС-код", {"cmd": "admin_masters_request"}))
+        kb.row()
+        kb.add(Callback("⬅️ Меню админки", {"cmd": "admin_menu"}))
+
+    try:
+        await event.edit_message(message=text, keyboard=kb.get_json())
+    except Exception as e:
+        logger.warning("Error editing masters status: %s", e)
+    await event.send_empty_answer()
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_masters_request",
+)
+async def admin_masters_request_code_vk(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    user_id = event.user_id
+    phone = get_user_phone(user_id, platform="vk")
+
+    if not phone:
+        pending_master_logins[user_id] = {"awaiting_phone": True}
+        try:
+            await event.edit_message(
+                message="📱 Введите номер телефона мастера, зарегистрированный в Masters (например, +79991234567):"
+            )
+        except Exception as e:
+            logger.warning("Error editing msg: %s", e)
+        await event.send_empty_answer()
+        return
+
+    await event.show_snackbar("Запрашиваю код в Masters...")
+    success, msg, session_data = request_master_login(phone)
+
+    if not success:
+        kb = Keyboard(inline=True)
+        kb.add(Callback("⬅️ Назад", {"cmd": "admin_masters"}))
+        try:
+            await event.edit_message(message=f"❌ {msg}\n\nПопробуйте ещё раз:", keyboard=kb.get_json())
+        except Exception as e:
+            logger.warning("Error editing msg: %s", e)
+        return
+
+    pending_master_logins[user_id] = session_data
+    try:
+        await event.edit_message(
+            message=(
+                f"📩 Код подтверждения отправлен\n\n"
+                f"На номер {session_data['phone_formatted']} отправлено СМС от Masters.\n\n"
+                "👉 Напишите 4 цифры из СМС в ответном сообщении:"
+            )
+        )
+    except Exception as e:
+        logger.warning("Error editing msg: %s", e)
+    await event.send_empty_answer()
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_masters_sync",
+)
+async def admin_masters_sync_now_vk(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    await event.show_snackbar("Синхронизирую записи...")
+    ok, count, msg = sync_masters_appointments()
+    await event.show_snackbar(msg[:60])
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_masters_logout",
+)
+async def admin_masters_disconnect_vk(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    disconnect_masters_session()
+    await event.show_snackbar("Синхронизация отключена.")
+    await admin_masters_status_vk(event)
+
+
+@labeler.message(func=lambda msg: bool(msg.from_id in pending_master_logins and msg.text and msg.text.strip().isdigit() and len(msg.text.strip()) == 4))
+async def handle_master_sms_code_vk(message: Message):
+    user_id = message.from_id
+    session_data = pending_master_logins.get(user_id)
+    if not session_data or session_data.get("awaiting_phone"):
+        return
+
+    code = message.text.strip()
+    success, msg = confirm_master_login(session_data, code)
+    if not success:
+        await message.answer(f"❌ {msg}\n\nПопробуйте ввести код ещё раз:")
+        return
+
+    pending_master_logins.pop(user_id, None)
+    ok, count, sync_msg = sync_masters_appointments()
+
+    await message.answer(
+        "🎉 Аккаунт Masters успешно подключен!\n\n"
+        f"✅ {sync_msg}\n"
+        "Теперь бот будет автоматически отправлять клиентам напоминания накануне вечером и за 2 часа до начала визита.",
+        keyboard=admin_menu_keyboard(),
+    )
+
+
+@labeler.message(func=lambda msg: bool(msg.from_id in pending_master_logins and pending_master_logins.get(msg.from_id, {}).get("awaiting_phone") and msg.text and is_phone_number(msg.text)))
+async def handle_master_phone_input_vk(message: Message):
+    user_id = message.from_id
+    phone = message.text.strip()
+    success, msg, session_data = request_master_login(phone)
+    if not success:
+        await message.answer(f"❌ {msg}\n\nПопробуйте ввести другой номер телефона:")
+        return
+
+    pending_master_logins[user_id] = session_data
+    await message.answer(
+        f"📩 Код подтверждения отправлен\n\n"
+        f"На номер {session_data['phone_formatted']} отправлено СМС от Masters.\n\n"
+        "👉 Напишите 4 цифры из СМС в ответном сообщении:"
+    )
+

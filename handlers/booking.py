@@ -3,10 +3,15 @@ import json
 import logging
 from typing import Any
 
-from vkbottle import GroupEventType
+from vkbottle import Callback, GroupEventType, Keyboard
 from vkbottle.bot import BotLabeler, Message, MessageEvent
 
 from config import ADMIN_IDS, BOOKING_URL
+from services.appointments import (
+    SARATOV_TZ,
+    cancel_appointment,
+    create_or_update_appointment,
+)
 from keyboards.booking import (
     get_booking_keyboard,
     get_days_keyboard,
@@ -307,8 +312,22 @@ async def sms_code_handler(message: Message):
 
     user_pending_booking.pop(user_id, None)
     calc = session_data["calc"]
-    dt = datetime.datetime.fromtimestamp(session_data["timestamp"])
+    dt = datetime.datetime.fromtimestamp(session_data["timestamp"], tz=SARATOV_TZ)
     phone = session_data["phone"]
+
+    appt_id = create_or_update_appointment(
+        phone=phone,
+        appointment_time=dt,
+        services=", ".join(calc["names"]),
+        total_price=calc["total_price"],
+        client_name=f"id{message.from_id}",
+        platform="vk",
+        platform_user_id=user_id,
+        masters_id=session_data.get("appointment_id"),
+    )
+
+    cancel_kb = Keyboard(inline=True)
+    cancel_kb.add(Callback("❌ Отменить запись", {"cmd": "appt_cancel", "id": appt_id}))
 
     await message.answer(
         f"🎉 Запись успешно подтверждена!\n\n"
@@ -316,7 +335,8 @@ async def sms_code_handler(message: Message):
         f"💰 Стоимость: {calc['total_price']} ₽ ({calc['duration_text']})\n"
         f"📅 Дата и время: {dt.strftime('%d.%m.%Y в %H:%M')}\n"
         f"📍 Адрес: Саратов, ул. имени Е.И. Пугачёва, 110\n\n"
-        "Ждём вас! Запись внесена в рабочий график мастера."
+        "Ждём вас! Мы пришлём напоминание накануне вечером и за 2 часа до визита.",
+        keyboard=cancel_kb.get_json(),
     )
 
     for admin_id in ADMIN_IDS:
@@ -335,6 +355,55 @@ async def sms_code_handler(message: Message):
             )
         except Exception as e:
             logger.error("Failed to notify VK admin %s: %s", admin_id, e)
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "appt_cancel",
+)
+async def callback_cancel_appointment(event: MessageEvent):
+    payload = get_payload(event)
+    appt_id = payload.get("id")
+    if not appt_id:
+        await event.show_snackbar("Некорректная запись")
+        return
+
+    success, msg, appt = cancel_appointment(int(appt_id))
+    if not success:
+        await event.show_snackbar(msg)
+        return
+
+    try:
+        await event.edit_message(
+            message=(
+                "❌ Запись успешно отменена\n\n"
+                "Будем рады видеть в другой раз! Чтобы выбрать новую дату, нажми «✂️ Записаться»."
+            )
+        )
+    except Exception as e:
+        logger.warning("Error editing cancelled appt msg: %s", e)
+
+    await event.show_snackbar("Запись отменена.")
+
+    if appt:
+        dt_str = str(appt.get("appointment_time", ""))
+        for admin_id in ADMIN_IDS:
+            try:
+                await event.ctx_api.messages.send(
+                    user_id=admin_id,
+                    random_id=0,
+                    message=(
+                        "⚠️ Клиент отменил запись (ВКонтакте)!\n\n"
+                        f"👤 Клиент: {appt.get('client_name') or 'Клиент'}\n"
+                        f"📱 Телефон: {appt.get('phone')}\n"
+                        f"✂️ Услуги: {appt.get('services')}\n"
+                        f"📅 Время: {dt_str}\n"
+                        "Слот снова свободен для других клиентов."
+                    ),
+                )
+            except Exception as e:
+                logger.error("Failed to notify VK admin %s: %s", admin_id, e)
 
 
 @labeler.message(func=lambda msg: bool(msg.text and is_phone_number(msg.text)))
