@@ -47,10 +47,13 @@ def _format_services_text(selected_keys: list[str] | set[str]) -> str:
     names_str = " + ".join(calc["names"])
     return (
         "✂️ Онлайн-запись к мастеру Борису Гафурову\n\n"
-        "Нажмите на услугу, чтобы добавить или убрать её:\n\n"
+        "💡 Как выбрать услуги:\n"
+        "• Нажми на услугу один раз — появится галочка ✅ (услуга выбрана)\n"
+        "• Нажми ещё раз — галочка снимется ⚪️ (услуга удалена)\n"
+        "Можно выбрать одну услугу или сразу обе.\n\n"
         f"📋 Выбрано: {names_str}\n"
         f"💰 Итого: {calc['total_price']} ₽ ({calc['duration_text']})\n\n"
-        "Нажмите кнопку ниже для перехода к выбору даты и времени:"
+        "После выбора нажми кнопку «📅 Выбрать время»:"
     )
 
 
@@ -86,9 +89,12 @@ async def callback_book_toggle(event: MessageEvent):
     key = payload.get("key")
 
     current = user_selected_services.get(user_id, {"hair"})
+    alert_msg = None
     if key in current:
         if len(current) > 1:
             current.remove(key)
+        else:
+            alert_msg = "Нужно выбрать хотя бы одну услугу"
     else:
         current.add(key)
     user_selected_services[user_id] = current
@@ -100,7 +106,11 @@ async def callback_book_toggle(event: MessageEvent):
         )
     except Exception as e:
         logger.warning("Error in callback_book_toggle: %s", e)
-    await event.send_empty_answer()
+
+    if alert_msg:
+        await event.show_snackbar(alert_msg)
+    else:
+        await event.send_empty_answer()
 
 
 @labeler.raw_event(
