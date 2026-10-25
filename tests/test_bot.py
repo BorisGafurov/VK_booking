@@ -399,6 +399,12 @@ class TestVkBookingBot(unittest.IsolatedAsyncioTestCase):
         disconnect_masters_session()
         self.assertIsNone(get_active_masters_session())
 
+    def test_broadcast_recipients(self):
+        from services.referrals import get_broadcast_recipients, save_user
+        save_user(vk_id=888777, first_name="Тест")
+        recipients = get_broadcast_recipients("vk")
+        self.assertIn(888777, recipients)
+
 
 if __name__ == "__main__":
     unittest.main()

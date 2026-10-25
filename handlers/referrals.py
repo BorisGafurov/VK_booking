@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import random
@@ -18,6 +19,7 @@ from services.masters_sync import (
 from services.referrals import (
     build_referral_link,
     get_active_rewards,
+    get_broadcast_recipients,
     get_pending_referrals,
     get_referral_stats,
     get_user_phone,
@@ -31,6 +33,7 @@ logger = logging.getLogger(__name__)
 labeler = BotLabeler()
 
 PAGE_SIZE = 3
+admin_broadcast_drafts: dict[int, dict] = {}
 
 
 def get_payload(event: MessageEvent) -> dict[str, Any]:
@@ -57,6 +60,8 @@ def admin_menu_keyboard() -> str:
     kb.add(Callback("💰 Активные бонусы", {"cmd": "admin_rewards", "offset": 0}))
     kb.row()
     kb.add(Callback("🔄 Синхронизация Masters", {"cmd": "admin_masters"}))
+    kb.row()
+    kb.add(Callback("📢 Сделать рассылку", {"cmd": "admin_broadcast"}))
     return kb.get_json()
 
 
@@ -547,4 +552,132 @@ async def handle_master_phone_input_vk(message: Message):
         f"На номер {session_data['phone_formatted']} отправлено СМС от Masters.\n\n"
         "👉 Напишите 4 цифры из СМС в ответном сообщении:"
     )
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_broadcast",
+)
+async def admin_broadcast_start_vk(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    admin_broadcast_drafts[event.user_id] = {"step": "awaiting_text"}
+    kb = Keyboard(inline=True)
+    kb.add(Callback("⬅️ Отмена", {"cmd": "admin_broadcast_cancel"}))
+
+    text = (
+        "📢 Рассылка сообщений клиентам (VK)\n\n"
+        "Напишите и отправьте в диалог текст, который хотите разослать всем клиентам сообщества.\n"
+        "(Можно использовать смайлы и абзацы)\n\n"
+        "После отправки бот покажет предпросмотр и попросит подтвердить рассылку перед отправкой."
+    )
+    await event.edit_message(message=text, keyboard=kb.get_json())
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_broadcast_cancel",
+)
+async def admin_broadcast_cancel_vk(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+    admin_broadcast_drafts.pop(event.user_id, None)
+    await event.edit_message(message="⚙️ Админ-панель:", keyboard=admin_menu_keyboard())
+
+
+@labeler.message(
+    func=lambda msg: bool(
+        msg.from_id
+        and is_admin(msg.from_id)
+        and admin_broadcast_drafts.get(msg.from_id, {}).get("step") == "awaiting_text"
+        and msg.text
+        and not msg.text.startswith("/")
+    )
+)
+async def admin_broadcast_receive_text_vk(message: Message):
+    admin_id = message.from_id
+    broadcast_text = message.text.strip()
+    recipients = get_broadcast_recipients("vk")
+    count = len(recipients)
+
+    admin_broadcast_drafts[admin_id] = {
+        "step": "confirm",
+        "text": broadcast_text,
+    }
+
+    kb = Keyboard(inline=True)
+    kb.add(Callback(f"✅ Отправить ({count})", {"cmd": "admin_broadcast_send"}))
+    kb.row()
+    kb.add(Callback("✏️ Изменить текст", {"cmd": "admin_broadcast"}))
+    kb.row()
+    kb.add(Callback("❌ Отмена", {"cmd": "admin_broadcast_cancel"}))
+
+    preview = (
+        "📢 Предпросмотр рассылки:\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"{broadcast_text}\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"👥 Получателей в VK: {count} чел.\n\n"
+        "Отправить это сообщение всем клиентам?"
+    )
+    await message.answer(preview, keyboard=kb.get_json())
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_broadcast_send",
+)
+async def admin_broadcast_send_vk(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    admin_id = event.user_id
+    draft = admin_broadcast_drafts.pop(admin_id, None)
+    if not draft or not draft.get("text"):
+        await event.show_snackbar("Черновик рассылки не найден.")
+        return
+
+    text = draft["text"]
+    recipients = get_broadcast_recipients("vk")
+    total = len(recipients)
+
+    await event.edit_message(message=f"⏳ Отправка рассылки...\n0 из {total}")
+
+    client_kb = Keyboard(inline=True)
+    client_kb.add(Callback("✂️ Записаться онлайн", {"cmd": "booking"}))
+
+    success_count = 0
+    fail_count = 0
+
+    for uid in recipients:
+        try:
+            await event.ctx_api.messages.send(
+                peer_id=uid,
+                message=text,
+                keyboard=client_kb.get_json(),
+                random_id=random.randint(1, 1000000000),
+            )
+            success_count += 1
+        except Exception as e:
+            logger.warning("Failed broadcast to %s: %s", uid, e)
+            fail_count += 1
+        await asyncio.sleep(0.05)
+
+    back_kb = Keyboard(inline=True)
+    back_kb.add(Callback("⬅️ Меню админки", {"cmd": "admin_menu"}))
+
+    report = (
+        "✅ Рассылка успешно завершена!\n\n"
+        f"📬 Доставлено: {success_count}\n"
+        f"⚠️ Не доставлено (сообщения запрещены): {fail_count}\n"
+        f"👥 Всего получателей: {total}"
+    )
+    await event.edit_message(message=report, keyboard=back_kb.get_json())
 
