@@ -1,13 +1,31 @@
 import asyncio
+import datetime
 import json
 import logging
 import random
+import re
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from vkbottle import Callback, GroupEventType, Keyboard
 from vkbottle.bot import BotLabeler, Message, MessageEvent
 
 from config import ADMIN_IDS, REFERRAL_REWARD_TEXT
+from services.appointments import (
+    SARATOV_TZ,
+    adjust_master_day_hours,
+    cancel_appointment,
+    complete_appointment,
+    confirm_appointment_by_client,
+    create_manual_appointment,
+    get_appointment,
+    get_current_saratov_time,
+    get_master_appointments,
+    get_master_day_schedule,
+    get_upcoming_days_schedule,
+    reschedule_appointment,
+    set_master_day_schedule,
+)
 from services.masters_sync import (
     confirm_master_login,
     disconnect_masters_session,
@@ -23,21 +41,28 @@ from services.referrals import (
     get_pending_referrals,
     get_referral_stats,
     get_user_phone,
+    is_admin_user,
+    is_master_user,
     is_phone_number,
     mark_referral_visited,
     mark_reward_used,
+    normalize_phone,
     save_user,
 )
 
 logger = logging.getLogger(__name__)
 labeler = BotLabeler()
 
-PAGE_SIZE = 3
+PAGE_SIZE = 4
 admin_broadcast_drafts: dict[int, dict] = {}
+admin_create_drafts: dict[int, dict] = {}
+admin_resched_drafts: dict[int, dict] = {}
+
+RU_MONTHS = ["", "янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"]
+RU_WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
 
 def get_payload(event: MessageEvent) -> dict[str, Any]:
-    """Safely extract payload dictionary from MessageEvent."""
     p = event.payload
     if isinstance(p, dict):
         return p
@@ -50,22 +75,49 @@ def get_payload(event: MessageEvent) -> dict[str, Any]:
 
 
 def is_admin(user_id: int) -> bool:
-    return user_id in ADMIN_IDS
+    return is_master_user(user_id, platform="vk")
 
 
 async def safe_event_answer(event: MessageEvent, snackbar: str | None = None) -> None:
-    """Safely answer MessageEvent once, ignoring invalid event_id if already answered or expired."""
     try:
         if snackbar:
-            await event.show_snackbar(snackbar)
+            await event.show_snackbar(snackbar[:60])
         else:
             await event.send_empty_answer()
     except Exception:
         pass
 
 
+def parse_to_saratov(val) -> datetime.datetime:
+    if isinstance(val, datetime.datetime):
+        if val.tzinfo is None:
+            return val.replace(tzinfo=SARATOV_TZ)
+        return val.astimezone(SARATOV_TZ)
+    if isinstance(val, str):
+        val_clean = val.replace("T", " ")
+        if "." in val_clean:
+            val_clean = val_clean.split(".")[0]
+        try:
+            dt = datetime.datetime.strptime(val_clean[:19], "%Y-%m-%d %H:%M:%S")
+            return dt.replace(tzinfo=SARATOV_TZ)
+        except Exception:
+            pass
+    return get_current_saratov_time()
+
+
+def format_dt(val) -> str:
+    dt = parse_to_saratov(val)
+    return f"{dt.day} {RU_MONTHS[dt.month]} в {dt.strftime('%H:%M')}"
+
+
 def admin_menu_keyboard() -> str:
     kb = Keyboard(inline=True)
+    kb.add(Callback("📋 Календарь записей", {"cmd": "admin_appts", "filter": "today", "offset": 0}))
+    kb.row()
+    kb.add(Callback("➕ Новая запись мастера", {"cmd": "admin_create_start"}))
+    kb.row()
+    kb.add(Callback("🕒 Рабочий график", {"cmd": "admin_sched", "offset": 0}))
+    kb.row()
     kb.add(Callback("⏳ Ожидают подтверждения", {"cmd": "admin_pending", "offset": 0}))
     kb.row()
     kb.add(Callback("💰 Активные бонусы", {"cmd": "admin_rewards", "offset": 0}))
@@ -76,9 +128,124 @@ def admin_menu_keyboard() -> str:
     return kb.get_json()
 
 
-def pending_referrals_keyboard(referrals: list[dict], offset: int, total: int) -> str:
+def admin_appts_keyboard(appts: list[dict], current_filter: str, offset: int, total: int) -> str:
     kb = Keyboard(inline=True)
 
+    filters = [
+        ("today", "Сегодня"),
+        ("tomorrow", "Завтра"),
+        ("pending", "Ожидающие"),
+        ("all", "Все"),
+    ]
+    for f_key, f_title in filters:
+        title = f"• {f_title} •" if f_key == current_filter else f_title
+        kb.add(Callback(title, {"cmd": "admin_appts", "filter": f_key, "offset": 0}))
+    kb.row()
+
+    for item in appts:
+        dt = parse_to_saratov(item["appointment_time"])
+        time_str = dt.strftime("%H:%M")
+        if current_filter == "all":
+            time_str = f"{dt.day} {RU_MONTHS[dt.month]} {time_str}"
+
+        st = item.get("status", "confirmed")
+        if st == "completed":
+            badge = "✅"
+        elif item.get("client_confirmed"):
+            badge = "🟢"
+        else:
+            badge = "⏳"
+
+        name = (item.get("client_name") or "Клиент")[:10]
+        price = item.get("total_price") or 0
+        btn_text = f"{badge} {time_str} · {name} ({price} ₽)"[:40]
+        kb.add(Callback(btn_text, {"cmd": "admin_appt", "id": item["id"], "filter": current_filter, "offset": offset}))
+        kb.row()
+
+    if not appts:
+        kb.add(Callback("Нет записей в этой категории", {"cmd": "noop"}))
+        kb.row()
+
+    nav_needed = False
+    if offset > 0:
+        prev_offset = max(0, offset - PAGE_SIZE)
+        kb.add(Callback("◀️ Назад", {"cmd": "admin_appts", "filter": current_filter, "offset": prev_offset}))
+        nav_needed = True
+    if offset + PAGE_SIZE < total:
+        next_offset = offset + PAGE_SIZE
+        kb.add(Callback("Вперёд ▶️", {"cmd": "admin_appts", "filter": current_filter, "offset": next_offset}))
+        nav_needed = True
+    if nav_needed:
+        kb.row()
+
+    kb.add(Callback("➕ Новая запись", {"cmd": "admin_create_start"}))
+    kb.add(Callback("⬅️ Главное меню", {"cmd": "admin_menu"}))
+    return kb.get_json()
+
+
+def admin_appt_card_keyboard(appt: dict, current_filter: str, offset: int) -> str:
+    kb = Keyboard(inline=True)
+    appt_id = appt["id"]
+    status = appt.get("status", "confirmed")
+
+    if status != "completed" and status != "cancelled":
+        kb.add(Callback("✂️ Пострижен (Завершить)", {"cmd": "admin_complete_appt", "id": appt_id, "filter": current_filter, "offset": offset}))
+        kb.row()
+        if not appt.get("client_confirmed"):
+            kb.add(Callback("✅ Подтвердить запись", {"cmd": "admin_confirm_appt", "id": appt_id, "filter": current_filter, "offset": offset}))
+            kb.row()
+        kb.add(Callback("🗓 Перенести", {"cmd": "admin_resched_start", "id": appt_id, "filter": current_filter, "offset": offset}))
+        kb.add(Callback("❌ Отменить", {"cmd": "admin_cancel_appt", "id": appt_id, "filter": current_filter, "offset": offset}))
+        kb.row()
+
+    kb.add(Callback("⬅️ К списку записей", {"cmd": "admin_appts", "filter": current_filter, "offset": offset}))
+    return kb.get_json()
+
+
+def admin_schedule_keyboard(days: list[dict], offset: int, total: int) -> str:
+    kb = Keyboard(inline=True)
+    for d in days:
+        status_txt = f"🟢 {d['start_time']} - {d['end_time']}" if d["is_working"] else "🔴 Выходной"
+        text = f"{d['title']}: {status_txt}"[:40]
+        kb.add(Callback(text, {"cmd": "admin_sched_day", "day_key": d["day_key"]}))
+        kb.row()
+
+    nav_needed = False
+    if offset > 0:
+        kb.add(Callback("◀️ Назад", {"cmd": "admin_sched", "offset": max(0, offset - 7)}))
+        nav_needed = True
+    if offset + 7 < total:
+        kb.add(Callback("Вперёд ▶️", {"cmd": "admin_sched", "offset": offset + 7}))
+        nav_needed = True
+    if nav_needed:
+        kb.row()
+
+    kb.add(Callback("⬅️ Главное меню", {"cmd": "admin_menu"}))
+    return kb.get_json()
+
+
+def admin_sched_day_keyboard(sched: dict) -> str:
+    day_key = sched["day_key"]
+    kb = Keyboard(inline=True)
+    if sched["is_working"]:
+        kb.add(Callback("🔴 Сделать выходным днем", {"cmd": "admin_sched_toggle", "day_key": day_key}))
+        kb.row()
+        kb.add(Callback("➖ Начало -1ч", {"cmd": "admin_sched_adj", "day_key": day_key, "which": "start", "delta": -1}))
+        kb.add(Callback("➕ Начало +1ч", {"cmd": "admin_sched_adj", "day_key": day_key, "which": "start", "delta": 1}))
+        kb.row()
+        kb.add(Callback("➖ Конец -1ч", {"cmd": "admin_sched_adj", "day_key": day_key, "which": "end", "delta": -1}))
+        kb.add(Callback("➕ Конец +1ч", {"cmd": "admin_sched_adj", "day_key": day_key, "which": "end", "delta": 1}))
+        kb.row()
+    else:
+        kb.add(Callback("🟢 Сделать рабочим (10:00 - 20:00)", {"cmd": "admin_sched_toggle", "day_key": day_key}))
+        kb.row()
+
+    kb.add(Callback("⬅️ К календарю графика", {"cmd": "admin_sched", "offset": 0}))
+    return kb.get_json()
+
+
+def pending_referrals_keyboard(referrals: list[dict], offset: int, total: int) -> str:
+    kb = Keyboard(inline=True)
     for item in referrals:
         invited_name = (item["invited_first_name"] or "Без имени")[:10]
         referrer_name = (item["referrer_first_name"] or "Без имени")[:10]
@@ -90,7 +257,6 @@ def pending_referrals_keyboard(referrals: list[dict], offset: int, total: int) -
         kb.add(Callback("Нет ожидающих рефералов", {"cmd": "noop"}))
         kb.row()
 
-    # Pagination row
     nav_row_needed = False
     if offset > 0:
         prev_offset = max(0, offset - PAGE_SIZE)
@@ -109,7 +275,6 @@ def pending_referrals_keyboard(referrals: list[dict], offset: int, total: int) -
 
 def active_rewards_keyboard(rewards: list[dict], offset: int, total: int) -> str:
     kb = Keyboard(inline=True)
-
     for item in rewards:
         first_name = (item["first_name"] or "Без имени")[:12]
         btn_text = f"✂️ Списать #{item['id']} · {first_name} · {item['amount']} ₽"[:40]
@@ -120,7 +285,6 @@ def active_rewards_keyboard(rewards: list[dict], offset: int, total: int) -> str
         kb.add(Callback("Нет активных бонусов", {"cmd": "noop"}))
         kb.row()
 
-    # Pagination row
     nav_row_needed = False
     if offset > 0:
         prev_offset = max(0, offset - PAGE_SIZE)
@@ -181,7 +345,6 @@ async def referrals(message: Message):
         f"• Доступных бонусов: {stats['active_rewards_count']} (на сумму {stats['active_rewards_sum']} ₽)\n\n"
         "Бонусы суммируются: 300 ₽ за каждого друга. Их можно списать при оплате услуг мастера."
     )
-
     await message.answer(text)
 
 
@@ -203,7 +366,7 @@ async def admin_panel(message: Message):
         return
 
     await message.answer(
-        "⚙️ Админ-панель:",
+        "⚙️ Панель мастера и администратора:",
         keyboard=admin_menu_keyboard(),
     )
 
@@ -213,28 +376,721 @@ async def admin_panel(message: Message):
     dataclass=MessageEvent,
     func=lambda event: get_payload(event).get("cmd") == "admin_menu",
 )
-async def admin_menu(event: MessageEvent):
+async def admin_menu_handler(event: MessageEvent):
     if not is_admin(event.user_id):
         await event.show_snackbar("Нет доступа.")
         return
 
     try:
         await event.edit_message(
-            message="⚙️ Админ-панель:",
+            message="⚙️ Панель мастера и администратора:",
             keyboard=admin_menu_keyboard(),
         )
     except Exception as e:
         logger.warning("Ошибка при открытии админ-меню: %s", e)
 
-    await event.send_empty_answer()
+    await safe_event_answer(event)
 
 
 @labeler.raw_event(
     GroupEventType.MESSAGE_EVENT,
     dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_appts",
+)
+async def admin_appts_handler(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    payload = get_payload(event)
+    current_filter = payload.get("filter", "today")
+    offset = int(payload.get("offset", 0))
+
+    appts, total = get_master_appointments(date_filter=current_filter, limit=PAGE_SIZE, offset=offset)
+
+    filter_names = {
+        "today": "Сегодня",
+        "tomorrow": "Завтра",
+        "pending": "Ожидающие подтверждения",
+        "all": "Все будущие",
+    }
+    title = filter_names.get(current_filter, current_filter)
+
+    text = f"📋 Календарь записей · {title} ({total} всего):\n\n"
+    if not appts:
+        text += "Записей не найдено."
+    else:
+        text += "Нажмите на запись для просмотра деталей, подтверждения, завершения визита или переноса:"
+
+    try:
+        await event.edit_message(
+            message=text,
+            keyboard=admin_appts_keyboard(appts, current_filter, offset, total),
+        )
+    except Exception as e:
+        logger.warning("Ошибка при открытии календаря записей: %s", e)
+
+    await safe_event_answer(event)
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_appt",
+)
+async def admin_appt_detail_handler(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    payload = get_payload(event)
+    appt_id = int(payload.get("id", 0))
+    current_filter = payload.get("filter", "today")
+    offset = int(payload.get("offset", 0))
+
+    appt = get_appointment(appt_id)
+    if not appt:
+        await event.show_snackbar("Запись не найдена")
+        return
+
+    st = appt.get("status", "confirmed")
+    if st == "completed":
+        st_text = "✂️ Завершена (клиент пострижен)"
+    elif st == "cancelled":
+        st_text = "❌ Отменена"
+    elif appt.get("client_confirmed"):
+        st_text = "🟢 Подтверждена клиентом"
+    else:
+        st_text = "⏳ Ожидает подтверждения"
+
+    phone = appt.get("phone") or "—"
+    name = appt.get("client_name") or "Клиент"
+    services = appt.get("services") or "—"
+    price = appt.get("total_price") or 0
+    time_fmt = format_dt(appt["appointment_time"])
+    platform = (appt.get("platform") or "vk").upper()
+    masters_id = appt.get("masters_id") or "—"
+
+    card_text = (
+        f"📋 Карточка записи #{appt['id']}\n\n"
+        f"👤 Клиент: {name}\n"
+        f"📱 Телефон: {phone}\n"
+        f"✂️ Услуга: {services}\n"
+        f"💰 Стоимость: {price} ₽\n"
+        f"⏰ Дата и время: {time_fmt}\n"
+        f"📌 Статус: {st_text}\n"
+        f"🌐 Источник: {platform}\n"
+        f"🔄 Masters ID: {masters_id}"
+    )
+
+    try:
+        await event.edit_message(
+            message=card_text,
+            keyboard=admin_appt_card_keyboard(appt, current_filter, offset),
+        )
+    except Exception as e:
+        logger.warning("Ошибка при открытии карточки записи: %s", e)
+
+    await safe_event_answer(event)
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_complete_appt",
+)
+async def admin_complete_appt_handler(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    payload = get_payload(event)
+    appt_id = int(payload.get("id", 0))
+    current_filter = payload.get("filter", "today")
+    offset = int(payload.get("offset", 0))
+
+    ok, msg, appt, ref_notify = complete_appointment(appt_id)
+    if not ok:
+        await event.show_snackbar(msg[:60])
+        return
+
+    if ref_notify and ref_notify.get("referrer_vk_id"):
+        try:
+            invited_name = ref_notify["invited_first_name"]
+            await event.ctx_api.messages.send(
+                peer_id=ref_notify["referrer_vk_id"],
+                random_id=random.randint(1, 2**31 - 1),
+                message=(
+                    "🎉 Отличные новости!\n"
+                    f"Твой друг {invited_name} посетил салон!\n"
+                    f"Тебе начислен бонус: {ref_notify['amount']} ₽.\n\n"
+                    f"💰 Доступный баланс бонусов: {ref_notify['new_balance']} ₽.\n"
+                    "Ты можешь списать их при следующем визите к мастеру!"
+                ),
+            )
+        except Exception as e:
+            logger.warning("Не удалось отправить уведомление рефереру: %s", e)
+
+    await safe_event_answer(event, snackbar=msg)
+    # Refresh card
+    updated_appt = get_appointment(appt_id)
+    if updated_appt:
+        try:
+            await event.edit_message(
+                message=f"✅ {msg}\n\n" + f"📋 Карточка записи #{appt_id}\nСтатус: ✂️ Завершена (клиент пострижен)",
+                keyboard=admin_appt_card_keyboard(updated_appt, current_filter, offset),
+            )
+        except Exception:
+            pass
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_confirm_appt",
+)
+async def admin_confirm_appt_handler(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    payload = get_payload(event)
+    appt_id = int(payload.get("id", 0))
+    ok, msg, appt = confirm_appointment_by_client(appt_id)
+    await safe_event_answer(event, snackbar=msg)
+    await admin_appt_detail_handler(event)
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_cancel_appt",
+)
+async def admin_cancel_appt_handler(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    payload = get_payload(event)
+    appt_id = int(payload.get("id", 0))
+    current_filter = payload.get("filter", "today")
+    offset = int(payload.get("offset", 0))
+
+    ok, msg, appt = cancel_appointment(appt_id)
+    if ok and appt and appt.get("platform_user_id") and appt.get("platform") == "vk":
+        try:
+            await event.ctx_api.messages.send(
+                peer_id=appt["platform_user_id"],
+                random_id=random.randint(1, 2**31 - 1),
+                message="❌ Ваша запись была отменена мастером.\n\nЕсли у вас есть вопросы, напишите мастеру в сообщения группы.",
+            )
+        except Exception as e:
+            logger.warning("Failed to notify client about cancel: %s", e)
+
+    await safe_event_answer(event, snackbar="Запись отменена")
+    # Redirect to list
+    appts, total = get_master_appointments(date_filter=current_filter, limit=PAGE_SIZE, offset=offset)
+    try:
+        await event.edit_message(
+            message=f"❌ Запись #{appt_id} отменена.\n\n📋 Календарь записей ({total} всего):",
+            keyboard=admin_appts_keyboard(appts, current_filter, offset, total),
+        )
+    except Exception:
+        pass
+
+
+# Reschedule flow
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_resched_start",
+)
+async def admin_resched_start_handler(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    payload = get_payload(event)
+    appt_id = int(payload.get("id", 0))
+    current_filter = payload.get("filter", "today")
+    offset = int(payload.get("offset", 0))
+
+    now = get_current_saratov_time()
+    kb = Keyboard(inline=True)
+    for i in range(5):
+        d = now + datetime.timedelta(days=i)
+        day_key = d.strftime("%Y-%m-%d")
+        title = f"{RU_WEEKDAYS[d.weekday()]}, {d.day} {RU_MONTHS[d.month]}"
+        if i == 0:
+            title += " (Сегодня)"
+        elif i == 1:
+            title += " (Завтра)"
+        kb.add(Callback(title, {"cmd": "admin_resched_day", "id": appt_id, "day": day_key, "filter": current_filter, "offset": offset}))
+        kb.row()
+
+    kb.add(Callback("⬅️ Назад к карточке", {"cmd": "admin_appt", "id": appt_id, "filter": current_filter, "offset": offset}))
+
+    try:
+        await event.edit_message(
+            message=f"🗓 Перенос записи #{appt_id}\n\nВыберите новую дату:",
+            keyboard=kb.get_json(),
+        )
+    except Exception as e:
+        logger.warning("Ошибка при переносе записи: %s", e)
+
+    await safe_event_answer(event)
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_resched_day",
+)
+async def admin_resched_day_handler(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    payload = get_payload(event)
+    appt_id = int(payload.get("id", 0))
+    day_key = payload.get("day", "")
+    current_filter = payload.get("filter", "today")
+    offset = int(payload.get("offset", 0))
+
+    hours = ["10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00"]
+    kb = Keyboard(inline=True)
+    count = 0
+    for h in hours:
+        kb.add(Callback(h, {"cmd": "admin_resched_time", "id": appt_id, "day": day_key, "time": h, "filter": current_filter, "offset": offset}))
+        count += 1
+        if count % 3 == 0:
+            kb.row()
+    if count % 3 != 0:
+        kb.row()
+
+    kb.add(Callback("✏️ Своё время (08:30...)", {"cmd": "admin_resched_custom", "id": appt_id, "day": day_key, "filter": current_filter, "offset": offset}))
+    kb.row()
+    kb.add(Callback("⬅️ Назад к датам", {"cmd": "admin_resched_start", "id": appt_id, "filter": current_filter, "offset": offset}))
+
+    try:
+        await event.edit_message(
+            message=f"🗓 Перенос записи #{appt_id} на {day_key}\n\nВыберите время или введите своё:",
+            keyboard=kb.get_json(),
+        )
+    except Exception as e:
+        logger.warning("Ошибка при выборе времени переноса: %s", e)
+
+    await safe_event_answer(event)
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_resched_time",
+)
+async def admin_resched_time_handler(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    payload = get_payload(event)
+    appt_id = int(payload.get("id", 0))
+    day_key = payload.get("day", "")
+    time_str = payload.get("time", "")
+
+    try:
+        new_dt = datetime.datetime.strptime(f"{day_key} {time_str}", "%Y-%m-%d %H:%M").replace(tzinfo=SARATOV_TZ)
+    except Exception:
+        await event.show_snackbar("Ошибка формата времени")
+        return
+
+    ok, msg, appt = reschedule_appointment(appt_id, new_dt)
+    if ok and appt and appt.get("platform_user_id") and appt.get("platform") == "vk":
+        try:
+            await event.ctx_api.messages.send(
+                peer_id=appt["platform_user_id"],
+                random_id=random.randint(1, 2**31 - 1),
+                message=(
+                    "🗓 Ваша запись перенесена мастером!\n\n"
+                    f"⏰ Новое время: {format_dt(new_dt)}\n"
+                    f"✂️ Услуга: {appt.get('services')}\n"
+                    f"💰 Стоимость: {appt.get('total_price')} ₽\n\n"
+                    "Ждем вас!"
+                ),
+            )
+        except Exception as e:
+            logger.warning("Failed to notify client: %s", e)
+
+    await safe_event_answer(event, snackbar="Запись успешно перенесена!")
+    await admin_appt_detail_handler(event)
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_resched_custom",
+)
+async def admin_resched_custom_handler(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    payload = get_payload(event)
+    appt_id = int(payload.get("id", 0))
+    day_key = payload.get("day", "")
+
+    admin_resched_drafts[event.user_id] = {
+        "appt_id": appt_id,
+        "day_key": day_key,
+        "step": "awaiting_custom_time",
+    }
+
+    kb = Keyboard(inline=True)
+    kb.add(Callback("⬅️ Отмена", {"cmd": "admin_appt", "id": appt_id, "filter": "today", "offset": 0}))
+
+    try:
+        await event.edit_message(
+            message=f"✏️ Введите желаемое время на {day_key}\n\nНапишите время в ответном сообщении (например 08:30 или 21:15):",
+            keyboard=kb.get_json(),
+        )
+    except Exception:
+        pass
+
+    await safe_event_answer(event)
+
+
+# Manual appointment creation
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_create_start",
+)
+async def admin_create_start_handler(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    admin_create_drafts[event.user_id] = {"step": "service"}
+
+    kb = Keyboard(inline=True)
+    kb.add(Callback("Мужская стрижка (1000 ₽)", {"cmd": "admin_create_svc", "svc": "Мужская стрижка", "price": 1000}))
+    kb.row()
+    kb.add(Callback("Стрижка + Борода (1400 ₽)", {"cmd": "admin_create_svc", "svc": "Стрижка + Борода", "price": 1400}))
+    kb.row()
+    kb.add(Callback("Стрижка бороды (600 ₽)", {"cmd": "admin_create_svc", "svc": "Стрижка бороды", "price": 600}))
+    kb.row()
+    kb.add(Callback("Отец + Сын (1800 ₽)", {"cmd": "admin_create_svc", "svc": "Отец + Сын", "price": 1800}))
+    kb.row()
+    kb.add(Callback("✏️ Другая услуга", {"cmd": "admin_create_svc_custom"}))
+    kb.row()
+    kb.add(Callback("⬅️ Отмена", {"cmd": "admin_menu"}))
+
+    try:
+        await event.edit_message(
+            message="➕ Создание новой записи мастером\n\nШаг 1 из 4: Выберите услугу или введите другое название:",
+            keyboard=kb.get_json(),
+        )
+    except Exception:
+        pass
+
+    await safe_event_answer(event)
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_create_svc",
+)
+async def admin_create_svc_handler(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    payload = get_payload(event)
+    draft = admin_create_drafts.setdefault(event.user_id, {})
+    draft["service"] = payload.get("svc", "Мужская стрижка")
+    draft["price"] = int(payload.get("price", 1000))
+    draft["step"] = "day"
+
+    now = get_current_saratov_time()
+    kb = Keyboard(inline=True)
+    for i in range(5):
+        d = now + datetime.timedelta(days=i)
+        day_key = d.strftime("%Y-%m-%d")
+        title = f"{RU_WEEKDAYS[d.weekday()]}, {d.day} {RU_MONTHS[d.month]}"
+        if i == 0:
+            title += " (Сегодня)"
+        elif i == 1:
+            title += " (Завтра)"
+        kb.add(Callback(title, {"cmd": "admin_create_day", "day": day_key}))
+        kb.row()
+
+    kb.add(Callback("⬅️ Отмена", {"cmd": "admin_menu"}))
+
+    try:
+        await event.edit_message(
+            message="➕ Шаг 2 из 4: Выберите дату записи:",
+            keyboard=kb.get_json(),
+        )
+    except Exception:
+        pass
+
+    await safe_event_answer(event)
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_create_svc_custom",
+)
+async def admin_create_svc_custom_handler(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    draft = admin_create_drafts.setdefault(event.user_id, {})
+    draft["step"] = "awaiting_custom_service"
+
+    kb = Keyboard(inline=True)
+    kb.add(Callback("⬅️ Отмена", {"cmd": "admin_create_start"}))
+
+    try:
+        await event.edit_message(
+            message="✏️ Введите название услуги в чат (например: Моделирование бороды VIP):",
+            keyboard=kb.get_json(),
+        )
+    except Exception:
+        pass
+
+    await safe_event_answer(event)
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_create_day",
+)
+async def admin_create_day_handler(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    payload = get_payload(event)
+    day_key = payload.get("day", "")
+    draft = admin_create_drafts.setdefault(event.user_id, {})
+    draft["day_key"] = day_key
+    draft["step"] = "time"
+
+    hours = ["09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00"]
+    kb = Keyboard(inline=True)
+    count = 0
+    for h in hours:
+        kb.add(Callback(h, {"cmd": "admin_create_time", "time": h}))
+        count += 1
+        if count % 3 == 0:
+            kb.row()
+    if count % 3 != 0:
+        kb.row()
+
+    kb.add(Callback("✏️ Другое время (08:30, 22:00...)", {"cmd": "admin_create_time_custom"}))
+    kb.row()
+    kb.add(Callback("⬅️ Назад к датам", {"cmd": "admin_create_start"}))
+
+    try:
+        await event.edit_message(
+            message=f"➕ Шаг 3 из 4: Выберите время на {day_key}:\n(можно записать клиента и вне стандартного рабочего графика)",
+            keyboard=kb.get_json(),
+        )
+    except Exception:
+        pass
+
+    await safe_event_answer(event)
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_create_time",
+)
+async def admin_create_time_handler(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    payload = get_payload(event)
+    draft = admin_create_drafts.setdefault(event.user_id, {})
+    draft["time_str"] = payload.get("time", "12:00")
+    draft["step"] = "awaiting_client_info"
+
+    curr_price = draft.get("price", 1000)
+    curr_svc = draft.get("service", "Стрижка")
+    day_key = draft.get("day_key", "")
+
+    kb = Keyboard(inline=True)
+    kb.add(Callback("⬅️ Отмена", {"cmd": "admin_menu"}))
+
+    try:
+        await event.edit_message(
+            message=(
+                f"➕ Шаг 4 из 4: Данные клиента и цена\n\n"
+                f"✂️ Услуга: {curr_svc}\n"
+                f"⏰ Время: {day_key} {draft['time_str']}\n"
+                f"💰 Цена: {curr_price} ₽\n\n"
+                "👉 Отправьте в чат телефон и имя клиента:\n"
+                "Например: +79173225155 Борис или просто номер 89991234567.\n\n"
+                "Если хотите изменить цену, укажите её в конце сообщения: 89173225155 Борис 1200"
+            ),
+            keyboard=kb.get_json(),
+        )
+    except Exception:
+        pass
+
+    await safe_event_answer(event)
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_create_time_custom",
+)
+async def admin_create_time_custom_handler(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    draft = admin_create_drafts.setdefault(event.user_id, {})
+    draft["step"] = "awaiting_custom_time"
+
+    kb = Keyboard(inline=True)
+    kb.add(Callback("⬅️ Отмена", {"cmd": "admin_create_start"}))
+
+    try:
+        await event.edit_message(
+            message=f"✏️ Введите любое время записи на {draft.get('day_key')}\n\nНапишите в ответном сообщении (например 08:30 или 22:00):",
+            keyboard=kb.get_json(),
+        )
+    except Exception:
+        pass
+
+    await safe_event_answer(event)
+
+
+# Schedule management
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_sched",
+)
+async def admin_sched_handler(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    payload = get_payload(event)
+    offset = int(payload.get("offset", 0))
+    all_days = get_upcoming_days_schedule(days_ahead=14)
+    slice_days = all_days[offset:offset+7]
+
+    text = (
+        "🕒 Управление рабочим графиком мастера\n\n"
+        "Выберите день, чтобы сделать его выходным/рабочим или изменить часы работы (прибавить/убавить начало и конец дня):"
+    )
+    try:
+        await event.edit_message(
+            message=text,
+            keyboard=admin_schedule_keyboard(slice_days, offset, len(all_days)),
+        )
+    except Exception:
+        pass
+
+    await safe_event_answer(event)
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_sched_day",
+)
+async def admin_sched_day_handler(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    payload = get_payload(event)
+    day_key = payload.get("day_key", "")
+    sched = get_master_day_schedule(day_key)
+
+    st_txt = "🟢 Рабочий день" if sched["is_working"] else "🔴 Выходной день"
+    card_text = (
+        f"🗓 График на {day_key}:\n\n"
+        f"• Статус: {st_txt}\n"
+        f"• Рабочие часы: {sched['start_time']} — {sched['end_time']}\n\n"
+        "Вы можете изменить статус дня или скорректировать рабочие часы:"
+    )
+
+    try:
+        await event.edit_message(
+            message=card_text,
+            keyboard=admin_sched_day_keyboard(sched),
+        )
+    except Exception:
+        pass
+
+    await safe_event_answer(event)
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_sched_toggle",
+)
+async def admin_sched_toggle_handler(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    payload = get_payload(event)
+    day_key = payload.get("day_key", "")
+    sched = get_master_day_schedule(day_key)
+    new_work = not sched["is_working"]
+    set_master_day_schedule(day_key, new_work, sched["start_time"], sched["end_time"])
+
+    msg = "День отмечен как РАБОЧИЙ!" if new_work else "День отмечен как ВЫХОДНОЙ!"
+    await safe_event_answer(event, snackbar=msg)
+    await admin_sched_day_handler(event)
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_sched_adj",
+)
+async def admin_sched_adj_handler(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    payload = get_payload(event)
+    day_key = payload.get("day_key", "")
+    which = payload.get("which", "start")
+    delta = int(payload.get("delta", 0))
+
+    if which == "start":
+        adjust_master_day_hours(day_key, start_delta_hours=delta, end_delta_hours=0)
+    else:
+        adjust_master_day_hours(day_key, start_delta_hours=0, end_delta_hours=delta)
+
+    await safe_event_answer(event, snackbar="Часы обновлены")
+    await admin_sched_day_handler(event)
+
+
+# Existing referrals & rewards callbacks
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
     func=lambda event: get_payload(event).get("cmd") == "admin_pending",
 )
-async def admin_pending(event: MessageEvent):
+async def admin_pending_handler(event: MessageEvent):
     if not is_admin(event.user_id):
         await event.show_snackbar("Нет доступа.")
         return
@@ -255,10 +1111,10 @@ async def admin_pending(event: MessageEvent):
             message=text,
             keyboard=pending_referrals_keyboard(referrals_list, offset, total),
         )
-    except Exception as e:
-        logger.warning("Ошибка при открытии списка ожидающих визита: %s", e)
+    except Exception:
+        pass
 
-    await event.send_empty_answer()
+    await safe_event_answer(event)
 
 
 @labeler.raw_event(
@@ -266,7 +1122,7 @@ async def admin_pending(event: MessageEvent):
     dataclass=MessageEvent,
     func=lambda event: get_payload(event).get("cmd") == "admin_rewards",
 )
-async def admin_rewards(event: MessageEvent):
+async def admin_rewards_handler(event: MessageEvent):
     if not is_admin(event.user_id):
         await event.show_snackbar("Нет доступа.")
         return
@@ -287,10 +1143,10 @@ async def admin_rewards(event: MessageEvent):
             message=text,
             keyboard=active_rewards_keyboard(rewards_list, offset, total),
         )
-    except Exception as e:
-        logger.warning("Ошибка при открытии активных бонусов: %s", e)
+    except Exception:
+        pass
 
-    await event.send_empty_answer()
+    await safe_event_answer(event)
 
 
 @labeler.raw_event(
@@ -307,13 +1163,9 @@ async def confirm_visit(event: MessageEvent):
     referral_id = int(payload.get("id", 0))
     offset = int(payload.get("offset", 0))
 
-    if not referral_id:
-        await event.show_snackbar("Некорректный ID")
-        return
-
     success, text, notify_data = mark_referral_visited(referral_id)
 
-    if success and notify_data:
+    if success and notify_data and notify_data.get("referrer_vk_id"):
         try:
             invited_name = notify_data["invited_first_name"]
             await event.ctx_api.messages.send(
@@ -327,8 +1179,8 @@ async def confirm_visit(event: MessageEvent):
                     "Ты можешь списать их при следующем визите к мастеру!"
                 ),
             )
-        except Exception as e:
-            logger.warning("Не удалось отправить уведомление рефереру: %s", e)
+        except Exception:
+            pass
 
     referrals_list, total = get_pending_referrals(limit=PAGE_SIZE, offset=offset)
     msg_text = f"ℹ️ {text}\n\n⏳ Ожидают подтверждения:"
@@ -338,10 +1190,10 @@ async def confirm_visit(event: MessageEvent):
             message=msg_text,
             keyboard=pending_referrals_keyboard(referrals_list, offset, total),
         )
-    except Exception as e:
-        logger.warning("Ошибка при обновлении списка рефералов: %s", e)
+    except Exception:
+        pass
 
-    await event.show_snackbar(text[:60])
+    await safe_event_answer(event, snackbar=text)
 
 
 @labeler.raw_event(
@@ -358,16 +1210,12 @@ async def use_reward(event: MessageEvent):
     reward_id = int(payload.get("id", 0))
     offset = int(payload.get("offset", 0))
 
-    if not reward_id:
-        await event.show_snackbar("Некорректный ID")
-        return
-
     success, text, notify_data = mark_reward_used(reward_id)
 
-    if success and notify_data:
+    if success and notify_data and notify_data.get("vk_id"):
         try:
             await event.ctx_api.messages.send(
-                peer_id=notify_data["user_vk_id"],
+                peer_id=notify_data["vk_id"],
                 random_id=random.randint(1, 2**31 - 1),
                 message=(
                     f"✂️ Бонус {notify_data['amount']} ₽ успешно списан в счет оплаты визита!\n"
@@ -375,8 +1223,8 @@ async def use_reward(event: MessageEvent):
                     "Спасибо за визит, ждем снова!"
                 ),
             )
-        except Exception as e:
-            logger.warning("Не удалось отправить клиенту уведомление о списании: %s", e)
+        except Exception:
+            pass
 
     rewards_list, total = get_active_rewards(limit=PAGE_SIZE, offset=offset)
     msg_text = f"ℹ️ {text}\n\n💰 Активные бонусы клиентов:"
@@ -386,10 +1234,10 @@ async def use_reward(event: MessageEvent):
             message=msg_text,
             keyboard=active_rewards_keyboard(rewards_list, offset, total),
         )
-    except Exception as e:
-        logger.warning("Ошибка при обновлении списка бонусов: %s", e)
+    except Exception:
+        pass
 
-    await event.show_snackbar(text[:60])
+    await safe_event_answer(event, snackbar=text)
 
 
 @labeler.raw_event(
@@ -397,18 +1245,19 @@ async def use_reward(event: MessageEvent):
     dataclass=MessageEvent,
     func=lambda event: get_payload(event).get("cmd") == "noop",
 )
-async def noop_handler(event: MessageEvent):
-    await event.send_empty_answer()
+async def noop(event: MessageEvent):
+    await safe_event_answer(event)
 
 
+# Masters integration
 @labeler.raw_event(
     GroupEventType.MESSAGE_EVENT,
     dataclass=MessageEvent,
     func=lambda event: get_payload(event).get("cmd") == "admin_masters",
 )
-async def admin_masters_status_vk(event: MessageEvent, answer_event: bool = True):
+async def admin_masters_status_vk(event: MessageEvent):
     if not is_admin(event.user_id):
-        await safe_event_answer(event, "Нет доступа.")
+        await event.show_snackbar("Нет доступа.")
         return
 
     session = get_active_masters_session()
@@ -417,9 +1266,9 @@ async def admin_masters_status_vk(event: MessageEvent, answer_event: bool = True
         text = (
             "✅ Синхронизация Masters подключена\n\n"
             f"📱 Номер мастера: {session['master_phone']}\n"
-            "Записи из Masters синхронизируются автоматически, "
+            "Записи из Masters автоматически синхронизируются каждые 10 минут, "
             "а клиенты получают напоминания о стрижке накануне вечером и за 2 часа.\n\n"
-            "Можно запустить принудительную синхронизацию прямо сейчас:"
+            "Вы можете запустить принудительную синхронизацию прямо сейчас:"
         )
         kb.add(Callback("🔄 Синхронизировать сейчас", {"cmd": "admin_masters_sync"}))
         kb.row()
@@ -431,18 +1280,18 @@ async def admin_masters_status_vk(event: MessageEvent, answer_event: bool = True
             "🔗 Подключение аккаунта Masters\n\n"
             "Бот может автоматически забирать все записи из твоего личного кабинета Masters "
             "и бесплатно рассылать клиентам напоминания о визите накануне вечером и за 2 часа.\n\n"
-            "Нажми кнопку ниже, чтобы отправить код подтверждения:"
+            "Нажми кнопку ниже, чтобы отправить проверочный код на твой номер:"
         )
-        kb.add(Callback("📲 Запросить СМС-код", {"cmd": "admin_masters_request"}))
+        kb.add(Callback("📲 Запросить СМС-код для входа", {"cmd": "admin_masters_request"}))
         kb.row()
         kb.add(Callback("⬅️ Меню админки", {"cmd": "admin_menu"}))
 
     try:
         await event.edit_message(message=text, keyboard=kb.get_json())
-    except Exception as e:
-        logger.warning("Error editing masters status: %s", e)
-    if answer_event:
-        await safe_event_answer(event)
+    except Exception:
+        pass
+
+    await safe_event_answer(event)
 
 
 @labeler.raw_event(
@@ -452,7 +1301,7 @@ async def admin_masters_status_vk(event: MessageEvent, answer_event: bool = True
 )
 async def admin_masters_request_code_vk(event: MessageEvent):
     if not is_admin(event.user_id):
-        await safe_event_answer(event, "Нет доступа.")
+        await event.show_snackbar("Нет доступа.")
         return
 
     user_id = event.user_id
@@ -462,36 +1311,33 @@ async def admin_masters_request_code_vk(event: MessageEvent):
         pending_master_logins[user_id] = {"awaiting_phone": True}
         try:
             await event.edit_message(
-                message="📱 Введите номер телефона мастера, зарегистрированный в Masters (например, +79991234567):"
+                message="📱 Введите номер телефона мастера\n\nНапишите номер, зарегистрированный в сервисе Masters (например, +79991234567):",
             )
-        except Exception as e:
-            logger.warning("Error editing msg: %s", e)
+        except Exception:
+            pass
         await safe_event_answer(event)
         return
 
-    await safe_event_answer(event, "Запрашиваю код в Masters...")
     success, msg, session_data = request_master_login(phone)
-
     if not success:
         kb = Keyboard(inline=True)
         kb.add(Callback("⬅️ Назад", {"cmd": "admin_masters"}))
         try:
             await event.edit_message(message=f"❌ {msg}\n\nПопробуйте ещё раз:", keyboard=kb.get_json())
-        except Exception as e:
-            logger.warning("Error editing msg: %s", e)
+        except Exception:
+            pass
+        await safe_event_answer(event)
         return
 
     pending_master_logins[user_id] = session_data
     try:
         await event.edit_message(
-            message=(
-                f"📩 Код подтверждения отправлен\n\n"
-                f"На номер {session_data['phone_formatted']} отправлено СМС от Masters.\n\n"
-                "👉 Напишите 4 цифры из СМС в ответном сообщении:"
-            )
+            message=f"📩 Код подтверждения отправлен\n\nНа номер {session_data['phone_formatted']} отправлено СМС от Masters.\n\n👉 Напишите 4 цифры из СМС в ответном сообщении:",
         )
-    except Exception as e:
-        logger.warning("Error editing msg: %s", e)
+    except Exception:
+        pass
+
+    await safe_event_answer(event)
 
 
 @labeler.raw_event(
@@ -501,12 +1347,11 @@ async def admin_masters_request_code_vk(event: MessageEvent):
 )
 async def admin_masters_sync_now_vk(event: MessageEvent):
     if not is_admin(event.user_id):
-        await safe_event_answer(event, "Нет доступа.")
+        await event.show_snackbar("Нет доступа.")
         return
 
     ok, count, msg = sync_masters_appointments()
-    await safe_event_answer(event, msg[:60])
-    await admin_masters_status_vk(event, answer_event=False)
+    await safe_event_answer(event, snackbar=msg)
 
 
 @labeler.raw_event(
@@ -516,76 +1361,41 @@ async def admin_masters_sync_now_vk(event: MessageEvent):
 )
 async def admin_masters_disconnect_vk(event: MessageEvent):
     if not is_admin(event.user_id):
-        await safe_event_answer(event, "Нет доступа.")
+        await event.show_snackbar("Нет доступа.")
         return
 
     disconnect_masters_session()
-    await safe_event_answer(event, "Синхронизация отключена.")
-    await admin_masters_status_vk(event, answer_event=False)
+    await safe_event_answer(event, snackbar="Синхронизация отключена")
+    await admin_masters_status_vk(event)
 
 
-@labeler.message(func=lambda msg: bool(msg.from_id in pending_master_logins and msg.text and msg.text.strip().isdigit() and len(msg.text.strip()) == 4))
-async def handle_master_sms_code_vk(message: Message):
-    user_id = message.from_id
-    session_data = pending_master_logins.get(user_id)
-    if not session_data or session_data.get("awaiting_phone"):
-        return
-
-    code = message.text.strip()
-    success, msg = confirm_master_login(session_data, code)
-    if not success:
-        await message.answer(f"❌ {msg}\n\nПопробуйте ввести код ещё раз:")
-        return
-
-    pending_master_logins.pop(user_id, None)
-    ok, count, sync_msg = sync_masters_appointments()
-
-    await message.answer(
-        "🎉 Аккаунт Masters успешно подключен!\n\n"
-        f"✅ {sync_msg}\n"
-        "Теперь бот будет автоматически отправлять клиентам напоминания накануне вечером и за 2 часа до начала визита.",
-        keyboard=admin_menu_keyboard(),
-    )
-
-
-@labeler.message(func=lambda msg: bool(msg.from_id in pending_master_logins and pending_master_logins.get(msg.from_id, {}).get("awaiting_phone") and msg.text and is_phone_number(msg.text)))
-async def handle_master_phone_input_vk(message: Message):
-    user_id = message.from_id
-    phone = message.text.strip()
-    success, msg, session_data = request_master_login(phone)
-    if not success:
-        await message.answer(f"❌ {msg}\n\nПопробуйте ввести другой номер телефона:")
-        return
-
-    pending_master_logins[user_id] = session_data
-    await message.answer(
-        f"📩 Код подтверждения отправлен\n\n"
-        f"На номер {session_data['phone_formatted']} отправлено СМС от Masters.\n\n"
-        "👉 Напишите 4 цифры из СМС в ответном сообщении:"
-    )
-
-
+# Broadcast flow
 @labeler.raw_event(
     GroupEventType.MESSAGE_EVENT,
     dataclass=MessageEvent,
     func=lambda event: get_payload(event).get("cmd") == "admin_broadcast",
 )
-async def admin_broadcast_start_vk(event: MessageEvent):
+async def admin_broadcast_start(event: MessageEvent):
     if not is_admin(event.user_id):
         await event.show_snackbar("Нет доступа.")
         return
 
     admin_broadcast_drafts[event.user_id] = {"step": "awaiting_text"}
+
     kb = Keyboard(inline=True)
     kb.add(Callback("⬅️ Отмена", {"cmd": "admin_broadcast_cancel"}))
 
     text = (
         "📢 Рассылка сообщений клиентам (VK)\n\n"
-        "Напишите и отправьте в диалог текст, который хотите разослать всем клиентам сообщества.\n"
-        "(Можно использовать смайлы и абзацы)\n\n"
+        "Напишите и отправьте в чат текст, который хотите разослать всем клиентам сообщества.\n\n"
         "После отправки бот покажет предпросмотр и попросит подтвердить рассылку перед отправкой."
     )
-    await event.edit_message(message=text, keyboard=kb.get_json())
+    try:
+        await event.edit_message(message=text, keyboard=kb.get_json())
+    except Exception:
+        pass
+
+    await safe_event_answer(event)
 
 
 @labeler.raw_event(
@@ -593,50 +1403,13 @@ async def admin_broadcast_start_vk(event: MessageEvent):
     dataclass=MessageEvent,
     func=lambda event: get_payload(event).get("cmd") == "admin_broadcast_cancel",
 )
-async def admin_broadcast_cancel_vk(event: MessageEvent):
+async def admin_broadcast_cancel(event: MessageEvent):
     if not is_admin(event.user_id):
         await event.show_snackbar("Нет доступа.")
         return
     admin_broadcast_drafts.pop(event.user_id, None)
-    await event.edit_message(message="⚙️ Админ-панель:", keyboard=admin_menu_keyboard())
-
-
-@labeler.message(
-    func=lambda msg: bool(
-        msg.from_id
-        and is_admin(msg.from_id)
-        and admin_broadcast_drafts.get(msg.from_id, {}).get("step") == "awaiting_text"
-        and msg.text
-        and not msg.text.startswith("/")
-    )
-)
-async def admin_broadcast_receive_text_vk(message: Message):
-    admin_id = message.from_id
-    broadcast_text = message.text.strip()
-    recipients = get_broadcast_recipients("vk")
-    count = len(recipients)
-
-    admin_broadcast_drafts[admin_id] = {
-        "step": "confirm",
-        "text": broadcast_text,
-    }
-
-    kb = Keyboard(inline=True)
-    kb.add(Callback(f"✅ Отправить ({count})", {"cmd": "admin_broadcast_send"}))
-    kb.row()
-    kb.add(Callback("✏️ Изменить текст", {"cmd": "admin_broadcast"}))
-    kb.row()
-    kb.add(Callback("❌ Отмена", {"cmd": "admin_broadcast_cancel"}))
-
-    preview = (
-        "📢 Предпросмотр рассылки:\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        f"{broadcast_text}\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"👥 Получателей в VK: {count} чел.\n\n"
-        "Отправить это сообщение всем клиентам?"
-    )
-    await message.answer(preview, keyboard=kb.get_json())
+    await safe_event_answer(event, snackbar="Рассылка отменена")
+    await admin_menu_handler(event)
 
 
 @labeler.raw_event(
@@ -644,25 +1417,25 @@ async def admin_broadcast_receive_text_vk(message: Message):
     dataclass=MessageEvent,
     func=lambda event: get_payload(event).get("cmd") == "admin_broadcast_send",
 )
-async def admin_broadcast_send_vk(event: MessageEvent):
+async def admin_broadcast_send(event: MessageEvent):
     if not is_admin(event.user_id):
         await event.show_snackbar("Нет доступа.")
         return
 
-    admin_id = event.user_id
-    draft = admin_broadcast_drafts.pop(admin_id, None)
+    draft = admin_broadcast_drafts.pop(event.user_id, None)
     if not draft or not draft.get("text"):
-        await event.show_snackbar("Черновик рассылки не найден.")
+        await event.show_snackbar("Черновик не найден")
         return
 
     text = draft["text"]
     recipients = get_broadcast_recipients("vk")
     total = len(recipients)
 
-    await event.edit_message(message=f"⏳ Отправка рассылки...\n0 из {total}")
-
-    client_kb = Keyboard(inline=True)
-    client_kb.add(Callback("✂️ Записаться онлайн", {"cmd": "booking"}))
+    await safe_event_answer(event)
+    try:
+        await event.edit_message(message=f"⏳ Отправка рассылки...\n0 из {total}")
+    except Exception:
+        pass
 
     success_count = 0
     fail_count = 0
@@ -670,25 +1443,233 @@ async def admin_broadcast_send_vk(event: MessageEvent):
     for uid in recipients:
         try:
             await event.ctx_api.messages.send(
-                peer_id=uid,
+                user_id=uid,
+                random_id=random.randint(1, 2**31 - 1),
                 message=text,
-                keyboard=client_kb.get_json(),
-                random_id=random.randint(1, 1000000000),
             )
             success_count += 1
-        except Exception as e:
-            logger.warning("Failed broadcast to %s: %s", uid, e)
+        except Exception:
             fail_count += 1
         await asyncio.sleep(0.05)
-
-    back_kb = Keyboard(inline=True)
-    back_kb.add(Callback("⬅️ Меню админки", {"cmd": "admin_menu"}))
 
     report = (
         "✅ Рассылка успешно завершена!\n\n"
         f"📬 Доставлено: {success_count}\n"
-        f"⚠️ Не доставлено (сообщения запрещены): {fail_count}\n"
+        f"⚠️ Не доставлено: {fail_count}\n"
         f"👥 Всего получателей: {total}"
     )
-    await event.edit_message(message=report, keyboard=back_kb.get_json())
+    kb = Keyboard(inline=True)
+    kb.add(Callback("⬅️ Меню админки", {"cmd": "admin_menu"}))
 
+    try:
+        await event.edit_message(message=report, keyboard=kb.get_json())
+    except Exception:
+        pass
+
+
+# Text messages handler (SMS, Phone, Broadcast, Reschedule custom time, Create appointment)
+@labeler.message()
+async def handle_vk_text_messages(message: Message):
+    user_id = message.from_id
+    raw_text = (message.text or "").strip()
+
+    # 1. Master SMS code
+    if user_id in pending_master_logins and raw_text.isdigit() and len(raw_text) == 4:
+        session_data = pending_master_logins.get(user_id)
+        if session_data and not session_data.get("awaiting_phone"):
+            success, msg = confirm_master_login(session_data, raw_text)
+            if not success:
+                await message.answer(f"❌ {msg}\n\nПопробуйте ввести код ещё раз:")
+                return
+            pending_master_logins.pop(user_id, None)
+            ok, count, sync_msg = sync_masters_appointments()
+            await message.answer(
+                "🎉 Аккаунт Masters успешно подключен!\n\n"
+                f"✅ {sync_msg}\n"
+                "Теперь бот будет автоматически отправлять клиентам напоминания накануне вечером и за 2 часа.",
+                keyboard=admin_menu_keyboard(),
+            )
+            return
+
+    # 2. Master phone input
+    if user_id in pending_master_logins and pending_master_logins.get(user_id, {}).get("awaiting_phone") and is_phone_number(raw_text):
+        success, msg, session_data = request_master_login(raw_text)
+        if not success:
+            await message.answer(f"❌ {msg}\n\nПопробуйте ввести другой номер телефона:")
+            return
+        pending_master_logins[user_id] = session_data
+        await message.answer(
+            f"📩 Код подтверждения отправлен\n\n"
+            f"На номер {session_data['phone_formatted']} отправлено СМС от Masters.\n\n"
+            "👉 Напишите 4 цифры из СМС в ответном сообщении:",
+        )
+        return
+
+    if not is_admin(user_id):
+        return
+
+    # 3. Broadcast draft text
+    if admin_broadcast_drafts.get(user_id, {}).get("step") == "awaiting_text":
+        recipients = get_broadcast_recipients("vk")
+        count = len(recipients)
+        admin_broadcast_drafts[user_id] = {
+            "step": "confirm",
+            "text": raw_text,
+        }
+        kb = Keyboard(inline=True)
+        kb.add(Callback(f"✅ Отправить ({count})", {"cmd": "admin_broadcast_send"}))
+        kb.row()
+        kb.add(Callback("✏️ Изменить текст", {"cmd": "admin_broadcast"}))
+        kb.add(Callback("❌ Отмена", {"cmd": "admin_broadcast_cancel"}))
+
+        preview = (
+            "📢 Предпросмотр рассылки:\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"{raw_text}\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"👥 Получателей в VK: {count} чел.\n\n"
+            "Отправить это сообщение всем клиентам?"
+        )
+        await message.answer(preview, keyboard=kb.get_json())
+        return
+
+    # 4. Reschedule custom time
+    if admin_resched_drafts.get(user_id, {}).get("step") == "awaiting_custom_time":
+        draft = admin_resched_drafts.pop(user_id)
+        m = re.match(r"^(\d{1,2})[:.-](\d{2})$", raw_text)
+        if not m:
+            await message.answer("⚠️ Неверный формат. Введите время в формате 08:30 или 21:00:")
+            admin_resched_drafts[user_id] = draft
+            return
+
+        h, mm = int(m.group(1)), int(m.group(2))
+        time_str = f"{h:02d}:{mm:02d}"
+        day_key = draft["day_key"]
+        appt_id = draft["appt_id"]
+
+        try:
+            new_dt = datetime.datetime.strptime(f"{day_key} {time_str}", "%Y-%m-%d %H:%M").replace(tzinfo=SARATOV_TZ)
+        except Exception:
+            await message.answer("Некорректная дата/время")
+            return
+
+        ok, msg, appt = reschedule_appointment(appt_id, new_dt)
+        if ok and appt and appt.get("platform_user_id") and appt.get("platform") == "vk":
+            try:
+                await message.ctx_api.messages.send(
+                    peer_id=appt["platform_user_id"],
+                    random_id=random.randint(1, 2**31 - 1),
+                    message=(
+                        "🗓 Ваша запись перенесена мастером!\n\n"
+                        f"⏰ Новое время: {format_dt(new_dt)}\n"
+                        f"✂️ Услуга: {appt.get('services')}\n"
+                        f"💰 Стоимость: {appt.get('total_price')} ₽\n\n"
+                        "Ждем вас!"
+                    ),
+                )
+            except Exception as e:
+                logger.warning("Failed to notify client: %s", e)
+
+        kb = Keyboard(inline=True)
+        kb.add(Callback("📋 К календарю", {"cmd": "admin_appts", "filter": "today", "offset": 0}))
+        await message.answer(f"✅ Запись #{appt_id} успешно перенесена на {format_dt(new_dt)}!", keyboard=kb.get_json())
+        return
+
+    # 5. Create appointment steps
+    create_draft = admin_create_drafts.get(user_id)
+    if create_draft:
+        step = create_draft.get("step")
+
+        if step == "awaiting_custom_service":
+            create_draft["service"] = raw_text
+            create_draft["price"] = 1000
+            create_draft["step"] = "day"
+
+            now = get_current_saratov_time()
+            kb = Keyboard(inline=True)
+            for i in range(5):
+                d = now + datetime.timedelta(days=i)
+                day_key = d.strftime("%Y-%m-%d")
+                title = f"{RU_WEEKDAYS[d.weekday()]}, {d.day} {RU_MONTHS[d.month]}"
+                kb.add(Callback(title, {"cmd": "admin_create_day", "day": day_key}))
+                kb.row()
+            kb.add(Callback("⬅️ Отмена", {"cmd": "admin_menu"}))
+            await message.answer(f"✂️ Услуга: {raw_text}\n\nШаг 2 из 4: Выберите дату записи:", keyboard=kb.get_json())
+            return
+
+        if step == "awaiting_custom_time":
+            m = re.match(r"^(\d{1,2})[:.-](\d{2})$", raw_text)
+            if not m:
+                await message.answer("⚠️ Неверный формат. Введите время в формате 08:30 или 22:00:")
+                return
+            h, mm = int(m.group(1)), int(m.group(2))
+            create_draft["time_str"] = f"{h:02d}:{mm:02d}"
+            create_draft["step"] = "awaiting_client_info"
+            kb = Keyboard(inline=True)
+            kb.add(Callback("⬅️ Отмена", {"cmd": "admin_menu"}))
+            await message.answer(
+                f"⏰ Время: {create_draft['time_str']}\n\n👉 Теперь отправьте телефон и имя клиента (например: +79173225155 Борис или с ценой: 89173225155 Борис 1200):",
+                keyboard=kb.get_json(),
+            )
+            return
+
+        if step == "awaiting_client_info":
+            tokens = raw_text.split()
+            phone = ""
+            name = "Клиент"
+            custom_price = create_draft.get("price", 1000)
+
+            for token in tokens:
+                digits = re.sub(r"\D", "", token)
+                if len(digits) >= 10:
+                    phone = normalize_phone(token)
+                elif token.isdigit() and int(token) >= 100:
+                    custom_price = int(token)
+                elif not token.isdigit():
+                    name = token
+
+            if not phone:
+                await message.answer("⚠️ Пожалуйста, укажите номер телефона клиента (например: +79173225155 Иван):")
+                return
+
+            name_parts = [t for t in tokens if not re.sub(r"\D", "", t).isdigit() or len(re.sub(r"\D", "", t)) < 5]
+            if name_parts:
+                name = " ".join(name_parts)
+
+            create_draft["phone"] = phone
+            create_draft["name"] = name
+            create_draft["price"] = custom_price
+
+            day_key = create_draft["day_key"]
+            time_str = create_draft["time_str"]
+            dt_obj = datetime.datetime.strptime(f"{day_key} {time_str}", "%Y-%m-%d %H:%M").replace(tzinfo=SARATOV_TZ)
+
+            ok, res_msg, appt_id = create_manual_appointment(
+                phone=phone,
+                appointment_time=dt_obj,
+                services=create_draft["service"],
+                total_price=custom_price,
+                client_name=name,
+                platform="manual",
+            )
+
+            admin_create_drafts.pop(user_id, None)
+
+            if ok:
+                kb = Keyboard(inline=True)
+                kb.add(Callback("📋 К календарю", {"cmd": "admin_appts", "filter": "today", "offset": 0}))
+                kb.add(Callback("➕ Создать ещё", {"cmd": "admin_create_start"}))
+                kb.row()
+                kb.add(Callback("⬅️ Главное меню", {"cmd": "admin_menu"}))
+                await message.answer(
+                    "🎉 Запись успешно создана!\n\n"
+                    f"👤 Клиент: {name} ({phone})\n"
+                    f"⏰ Дата и время: {format_dt(dt_obj)}\n"
+                    f"✂️ Услуга: {create_draft['service']}\n"
+                    f"💰 Стоимость: {custom_price} ₽\n\n"
+                    "✅ Запись внесена в календарь и синхронизирована с Masters CRM!",
+                    keyboard=kb.get_json(),
+                )
+            else:
+                await message.answer(f"❌ Ошибка создания записи: {res_msg}")
+            return
