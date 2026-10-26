@@ -19,6 +19,7 @@ from services.appointments import (
     confirm_appointment_by_client,
     create_manual_appointment,
     get_appointment,
+    get_appointments_counts,
     get_current_saratov_time,
     get_master_appointments,
     get_master_day_schedule,
@@ -53,7 +54,7 @@ from services.referrals import (
 logger = logging.getLogger(__name__)
 labeler = BotLabeler()
 
-PAGE_SIZE = 4
+PAGE_SIZE = 3
 admin_broadcast_drafts: dict[int, dict] = {}
 admin_create_drafts: dict[int, dict] = {}
 admin_resched_drafts: dict[int, dict] = {}
@@ -111,38 +112,58 @@ def format_dt(val) -> str:
 
 
 def admin_menu_keyboard() -> str:
+    """
+    VK Inline Keyboard: strictly <= 6 rows and <= 10 buttons.
+    Total: 4 rows, 7 buttons.
+    """
     kb = Keyboard(inline=True)
-    kb.add(Callback("📋 Календарь записей", {"cmd": "admin_appts", "filter": "today", "offset": 0}))
+    kb.add(Callback("📋 Календарь записей", {"cmd": "admin_appts", "filter": "all", "offset": 0}))
     kb.row()
-    kb.add(Callback("➕ Новая запись мастера", {"cmd": "admin_create_start"}))
-    kb.row()
+    kb.add(Callback("➕ Новая запись", {"cmd": "admin_create_start"}))
     kb.add(Callback("🕒 Рабочий график", {"cmd": "admin_sched", "offset": 0}))
     kb.row()
-    kb.add(Callback("⏳ Ожидают подтверждения", {"cmd": "admin_pending", "offset": 0}))
+    kb.add(Callback("⏳ Ожидающие", {"cmd": "admin_pending", "offset": 0}))
+    kb.add(Callback("💰 Бонусы", {"cmd": "admin_rewards", "offset": 0}))
     kb.row()
-    kb.add(Callback("💰 Активные бонусы", {"cmd": "admin_rewards", "offset": 0}))
-    kb.row()
-    kb.add(Callback("🔄 Синхронизация Masters", {"cmd": "admin_masters"}))
-    kb.row()
-    kb.add(Callback("📢 Сделать рассылку", {"cmd": "admin_broadcast"}))
+    kb.add(Callback("🔄 Masters", {"cmd": "admin_masters"}))
+    kb.add(Callback("📢 Рассылка", {"cmd": "admin_broadcast"}))
     return kb.get_json()
 
 
-def admin_appts_keyboard(appts: list[dict], current_filter: str, offset: int, total: int) -> str:
+def admin_appts_keyboard(
+    appts: list[dict],
+    current_filter: str,
+    offset: int,
+    total: int,
+    counts: dict[str, int] | None = None,
+) -> str:
+    """
+    VK Inline Keyboard: strictly <= 6 rows and <= 10 buttons.
+    Row 1: Filters (3 buttons)
+    Rows 2..4: Up to 3 appointments (1 button per row)
+    Row 5: Navigation (1-2 buttons, if needed)
+    Row 6: Actions (2 buttons)
+    Max rows: 6, max buttons: 10.
+    """
     kb = Keyboard(inline=True)
 
+    if counts is None:
+        try:
+            counts = get_appointments_counts()
+        except Exception:
+            counts = {"today": 0, "tomorrow": 0, "pending": 0, "all": total}
+
     filters = [
-        ("today", "Сегодня"),
-        ("tomorrow", "Завтра"),
-        ("pending", "Ожидающие"),
-        ("all", "Все"),
+        ("today", f"Сегодня ({counts.get('today', 0)})"),
+        ("tomorrow", f"Завтра ({counts.get('tomorrow', 0)})"),
+        ("all", f"Все ({counts.get('all', 0)})"),
     ]
     for f_key, f_title in filters:
         title = f"• {f_title} •" if f_key == current_filter else f_title
         kb.add(Callback(title, {"cmd": "admin_appts", "filter": f_key, "offset": 0}))
     kb.row()
 
-    for item in appts:
+    for item in appts[:3]:
         dt = parse_to_saratov(item["appointment_time"])
         time_str = dt.strftime("%H:%M")
         if current_filter == "all":
@@ -178,8 +199,8 @@ def admin_appts_keyboard(appts: list[dict], current_filter: str, offset: int, to
     if nav_needed:
         kb.row()
 
-    kb.add(Callback("➕ Новая запись", {"cmd": "admin_create_start"}))
-    kb.add(Callback("⬅️ Главное меню", {"cmd": "admin_menu"}))
+    kb.add(Callback("➕ Новая", {"cmd": "admin_create_start"}))
+    kb.add(Callback("⬅️ Меню", {"cmd": "admin_menu"}))
     return kb.get_json()
 
 
@@ -203,19 +224,26 @@ def admin_appt_card_keyboard(appt: dict, current_filter: str, offset: int) -> st
 
 
 def admin_schedule_keyboard(days: list[dict], offset: int, total: int) -> str:
+    """
+    VK Inline Keyboard for schedule: 4 days per page.
+    Rows 1-4: 4 days (1 button per row)
+    Row 5: Navigation (1-2 buttons)
+    Row 6: Main menu (1 button)
+    Total: 6 rows, 7 buttons.
+    """
     kb = Keyboard(inline=True)
-    for d in days:
-        status_txt = f"🟢 {d['start_time']} - {d['end_time']}" if d["is_working"] else "🔴 Выходной"
+    for d in days[:4]:
+        status_txt = f"🟢 {d['start_time']}-{d['end_time']}" if d["is_working"] else "🔴 Выходной"
         text = f"{d['title']}: {status_txt}"[:40]
         kb.add(Callback(text, {"cmd": "admin_sched_day", "day_key": d["day_key"]}))
         kb.row()
 
     nav_needed = False
     if offset > 0:
-        kb.add(Callback("◀️ Назад", {"cmd": "admin_sched", "offset": max(0, offset - 7)}))
+        kb.add(Callback("◀️ Назад", {"cmd": "admin_sched", "offset": max(0, offset - 4)}))
         nav_needed = True
-    if offset + 7 < total:
-        kb.add(Callback("Вперёд ▶️", {"cmd": "admin_sched", "offset": offset + 7}))
+    if offset + 4 < total:
+        kb.add(Callback("Вперёд ▶️", {"cmd": "admin_sched", "offset": offset + 4}))
         nav_needed = True
     if nav_needed:
         kb.row()
@@ -237,7 +265,7 @@ def admin_sched_day_keyboard(sched: dict) -> str:
         kb.add(Callback("➕ Конец +1ч", {"cmd": "admin_sched_adj", "day_key": day_key, "which": "end", "delta": 1}))
         kb.row()
     else:
-        kb.add(Callback("🟢 Сделать рабочим (10:00 - 20:00)", {"cmd": "admin_sched_toggle", "day_key": day_key}))
+        kb.add(Callback("🟢 Сделать рабочим (10:00 - 19:00)", {"cmd": "admin_sched_toggle", "day_key": day_key}))
         kb.row()
 
     kb.add(Callback("⬅️ К календарю графика", {"cmd": "admin_sched", "offset": 0}))
@@ -365,10 +393,14 @@ async def admin_panel(message: Message):
         await message.answer("Нет доступа.")
         return
 
-    await message.answer(
-        "⚙️ Панель мастера и администратора:",
-        keyboard=admin_menu_keyboard(),
-    )
+    try:
+        await message.answer(
+            "⚙️ Панель мастера и администратора:",
+            keyboard=admin_menu_keyboard(),
+        )
+    except Exception as e:
+        logger.error("Ошибка при открытии админ-панели в VK: %s", e)
+        await message.answer(f"Ошибка при открытии панели мастера: {e}")
 
 
 @labeler.raw_event(
@@ -403,9 +435,10 @@ async def admin_appts_handler(event: MessageEvent):
         return
 
     payload = get_payload(event)
-    current_filter = payload.get("filter", "today")
+    current_filter = payload.get("filter", "all")
     offset = int(payload.get("offset", 0))
 
+    counts = get_appointments_counts()
     appts, total = get_master_appointments(date_filter=current_filter, limit=PAGE_SIZE, offset=offset)
 
     filter_names = {
@@ -425,7 +458,7 @@ async def admin_appts_handler(event: MessageEvent):
     try:
         await event.edit_message(
             message=text,
-            keyboard=admin_appts_keyboard(appts, current_filter, offset, total),
+            keyboard=admin_appts_keyboard(appts, current_filter, offset, total, counts),
         )
     except Exception as e:
         logger.warning("Ошибка при открытии календаря записей: %s", e)
@@ -657,7 +690,7 @@ async def admin_resched_day_handler(event: MessageEvent):
     current_filter = payload.get("filter", "today")
     offset = int(payload.get("offset", 0))
 
-    hours = ["10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00"]
+    hours = ["10:00", "12:00", "14:00", "16:00", "18:00", "19:00"]
     kb = Keyboard(inline=True)
     count = 0
     for h in hours:
@@ -665,8 +698,6 @@ async def admin_resched_day_handler(event: MessageEvent):
         count += 1
         if count % 3 == 0:
             kb.row()
-    if count % 3 != 0:
-        kb.row()
 
     kb.add(Callback("✏️ Своё время (08:30...)", {"cmd": "admin_resched_custom", "id": appt_id, "day": day_key, "filter": current_filter, "offset": offset}))
     kb.row()
@@ -881,7 +912,7 @@ async def admin_create_day_handler(event: MessageEvent):
     draft["day_key"] = day_key
     draft["step"] = "time"
 
-    hours = ["09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00"]
+    hours = ["10:00", "12:00", "14:00", "16:00", "18:00", "19:00"]
     kb = Keyboard(inline=True)
     count = 0
     for h in hours:
@@ -889,8 +920,6 @@ async def admin_create_day_handler(event: MessageEvent):
         count += 1
         if count % 3 == 0:
             kb.row()
-    if count % 3 != 0:
-        kb.row()
 
     kb.add(Callback("✏️ Другое время (08:30, 22:00...)", {"cmd": "admin_create_time_custom"}))
     kb.row()
@@ -989,7 +1018,7 @@ async def admin_sched_handler(event: MessageEvent):
     payload = get_payload(event)
     offset = int(payload.get("offset", 0))
     all_days = get_upcoming_days_schedule(days_ahead=14)
-    slice_days = all_days[offset:offset+7]
+    slice_days = all_days[offset:offset+4]
 
     text = (
         "🕒 Управление рабочим графиком мастера\n\n"
@@ -1467,8 +1496,18 @@ async def admin_broadcast_send(event: MessageEvent):
         pass
 
 
+def _has_active_vk_draft(message: Message) -> bool:
+    uid = message.from_id
+    return (
+        uid in pending_master_logins
+        or uid in admin_broadcast_drafts
+        or uid in admin_resched_drafts
+        or uid in admin_create_drafts
+    )
+
+
 # Text messages handler (SMS, Phone, Broadcast, Reschedule custom time, Create appointment)
-@labeler.message()
+@labeler.message(func=_has_active_vk_draft)
 async def handle_vk_text_messages(message: Message):
     user_id = message.from_id
     raw_text = (message.text or "").strip()
