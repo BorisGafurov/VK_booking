@@ -26,6 +26,7 @@ from services.appointments import (
     get_upcoming_days_schedule,
     reschedule_appointment,
     set_master_day_schedule,
+    update_appointment_price_and_service,
 )
 from services.client_import import (
     get_clients_page,
@@ -67,6 +68,7 @@ admin_broadcast_drafts: dict[int, dict] = {}
 admin_create_drafts: dict[int, dict] = {}
 admin_resched_drafts: dict[int, dict] = {}
 admin_edit_client_drafts: dict[int, dict] = {}
+admin_edit_price_drafts: dict[int, dict] = {}
 admin_clients_state: dict[int, dict] = {}
 
 RU_MONTHS = ["", "янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"]
@@ -227,13 +229,15 @@ def admin_appt_card_keyboard(appt: dict, current_filter: str, offset: int) -> st
         if not appt.get("client_confirmed"):
             kb.add(Callback("✅ Подтвердить запись", {"cmd": "admin_confirm_appt", "id": appt_id, "filter": current_filter, "offset": offset}))
             kb.row()
-        kb.add(Callback("✏️ Указать имя", {"cmd": "admin_edit_client", "id": appt_id, "filter": current_filter, "offset": offset}))
-        kb.add(Callback("🗓 Перенести", {"cmd": "admin_resched_start", "id": appt_id, "filter": current_filter, "offset": offset}))
+        kb.add(Callback("✏️ Имя", {"cmd": "admin_edit_client", "id": appt_id, "filter": current_filter, "offset": offset}))
+        kb.add(Callback("💰 Цена/услуга", {"cmd": "admin_edit_price", "id": appt_id, "filter": current_filter, "offset": offset}))
         kb.row()
+        kb.add(Callback("🗓 Перенести", {"cmd": "admin_resched_start", "id": appt_id, "filter": current_filter, "offset": offset}))
         kb.add(Callback("❌ Отменить", {"cmd": "admin_cancel_appt", "id": appt_id, "filter": current_filter, "offset": offset}))
         kb.row()
     else:
-        kb.add(Callback("✏️ Указать имя", {"cmd": "admin_edit_client", "id": appt_id, "filter": current_filter, "offset": offset}))
+        kb.add(Callback("✏️ Имя", {"cmd": "admin_edit_client", "id": appt_id, "filter": current_filter, "offset": offset}))
+        kb.add(Callback("💰 Цена/услуга", {"cmd": "admin_edit_price", "id": appt_id, "filter": current_filter, "offset": offset}))
         kb.row()
 
     kb.add(Callback("⬅️ К списку записей", {"cmd": "admin_appts", "filter": current_filter, "offset": offset}))
@@ -1628,6 +1632,118 @@ async def admin_edit_client_handler(event: MessageEvent):
     await safe_event_answer(event)
 
 
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_edit_price",
+)
+async def admin_edit_price_handler(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    payload = get_payload(event)
+    appt_id = int(payload.get("id", 0))
+    current_filter = payload.get("filter", "today")
+    offset = int(payload.get("offset", 0))
+
+    appt = get_appointment(appt_id)
+    if not appt:
+        await event.show_snackbar("Запись не найдена")
+        return
+
+    cur_svc = appt.get("services") or "—"
+    cur_price = appt.get("total_price") or 0
+    cur_client = appt.get("client_name") or "Клиент"
+
+    text = (
+        f"💰 Редактирование услуги и стоимости для записи #{appt_id}\n\n"
+        f"👤 Клиент: {cur_client}\n"
+        f"✂️ Текущая услуга: {cur_svc}\n"
+        f"💵 Текущая стоимость: {cur_price} ₽\n\n"
+        "👉 Выберите услугу с ценой в 1 клик или введите свою цену:"
+    )
+
+    kb = Keyboard(inline=True)
+    kb.add(Callback("💈 Стрижка — 2 300 ₽", {"cmd": "admin_set_price", "id": appt_id, "price": 2300, "svc": "hair", "filter": current_filter, "offset": offset}))
+    kb.row()
+    kb.add(Callback("🧔 Оформление бороды — 700 ₽", {"cmd": "admin_set_price", "id": appt_id, "price": 700, "svc": "beard", "filter": current_filter, "offset": offset}))
+    kb.row()
+    kb.add(Callback("💈+🧔 Стрижка+Борода — 3 000 ₽", {"cmd": "admin_set_price", "id": appt_id, "price": 3000, "svc": "combo", "filter": current_filter, "offset": offset}))
+    kb.row()
+    kb.add(Callback("✏️ Ввести свою цену", {"cmd": "admin_set_custom_price", "id": appt_id, "filter": current_filter, "offset": offset}))
+    kb.row()
+    kb.add(Callback("⬅️ Назад к карточке", {"cmd": "admin_appt_detail", "id": appt_id, "filter": current_filter, "offset": offset}))
+
+    try:
+        await event.edit_message(message=text, keyboard=kb.get_json())
+    except Exception:
+        pass
+    await safe_event_answer(event)
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_set_price",
+)
+async def admin_set_price_handler(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    payload = get_payload(event)
+    appt_id = int(payload.get("id", 0))
+    price = int(payload.get("price", 2300))
+    svc_code = payload.get("svc", "hair")
+
+    svc_map = {
+        "hair": "Стрижка (МУЖСКАЯ)",
+        "beard": "Оформление бороды",
+        "combo": "Стрижка + Борода",
+    }
+    svc_name = svc_map.get(svc_code, "Стрижка")
+
+    ok, msg, appt = update_appointment_price_and_service(appt_id, price, svc_name)
+    await safe_event_answer(event, snackbar=f"Стоимость обновлена: {price} ₽")
+    await admin_appt_detail_handler(event)
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_set_custom_price",
+)
+async def admin_set_custom_price_handler(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    payload = get_payload(event)
+    appt_id = int(payload.get("id", 0))
+    current_filter = payload.get("filter", "today")
+    offset = int(payload.get("offset", 0))
+
+    admin_edit_price_drafts[event.user_id] = {
+        "appt_id": appt_id,
+        "current_filter": current_filter,
+        "offset": offset,
+    }
+
+    text = (
+        f"✏️ Ввод своей стоимости для записи #{appt_id}\n\n"
+        "Отправьте в чат новую стоимость в рублях (например: 700, 1500 или 2000):"
+    )
+    kb = Keyboard(inline=True)
+    kb.add(Callback("⬅️ Отмена", {"cmd": "admin_edit_price", "id": appt_id, "filter": current_filter, "offset": offset}))
+
+    try:
+        await event.edit_message(message=text, keyboard=kb.get_json())
+    except Exception:
+        pass
+    await safe_event_answer(event)
+
+
 def _has_active_vk_draft(message: Message) -> bool:
     uid = message.from_id
     return (
@@ -1636,6 +1752,7 @@ def _has_active_vk_draft(message: Message) -> bool:
         or uid in admin_resched_drafts
         or uid in admin_create_drafts
         or uid in admin_edit_client_drafts
+        or uid in admin_edit_price_drafts
         or uid in admin_clients_state
     )
 
@@ -1710,6 +1827,33 @@ async def handle_vk_text_messages(message: Message):
 
         await message.answer(
             f"✅ Имя клиента обновлено!\n\n👤 Клиент: {client_name}\n📱 Телефон: {appt.get('phone', '—')}",
+            keyboard=kb.get_json(),
+        )
+        return
+
+    # 3b. Price edit on appointment
+    if user_id in admin_edit_price_drafts:
+        p_draft = admin_edit_price_drafts.pop(user_id)
+        appt_id = p_draft["appt_id"]
+        current_filter = p_draft["current_filter"]
+        offset = p_draft["offset"]
+
+        price_digits = re.sub(r"\D", "", raw_text)
+        if not price_digits or int(price_digits) <= 0:
+            await message.answer("⚠️ Пожалуйста, введите корректную сумму в рублях (например: 700 или 1500):")
+            admin_edit_price_drafts[user_id] = p_draft
+            return
+
+        new_price = int(price_digits)
+        ok, res_msg, updated_appt = update_appointment_price_and_service(appt_id, new_price)
+
+        kb = Keyboard(inline=True)
+        kb.add(Callback("📋 К карточке", {"cmd": "admin_appt_detail", "id": appt_id, "filter": current_filter, "offset": offset}))
+        kb.row()
+        kb.add(Callback("⬅️ К записям", {"cmd": "admin_appts", "filter": current_filter, "offset": offset}))
+
+        await message.answer(
+            f"✅ Стоимость записи #{appt_id} успешно изменена на {new_price} ₽!",
             keyboard=kb.get_json(),
         )
         return
