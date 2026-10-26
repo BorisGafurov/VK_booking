@@ -824,7 +824,7 @@ async def admin_create_start_handler(event: MessageEvent):
 
     admin_create_drafts[event.user_id] = {"step": "service"}
 
-    opts = get_service_options_for_creation()
+    opts = await asyncio.to_thread(get_service_options_for_creation)
     kb = Keyboard(inline=True)
     for o in opts[:3]:
         kb.add(Callback(f"{o['name']} ({o['price']} ₽)"[:40], {"cmd": "admin_create_svc", "svc": o["name"], "price": o["price"]}))
