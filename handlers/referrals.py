@@ -27,6 +27,14 @@ from services.appointments import (
     reschedule_appointment,
     set_master_day_schedule,
 )
+from services.client_import import (
+    get_clients_page,
+    get_clients_stats,
+    import_clients_from_file,
+    import_clients_from_text,
+    update_appointment_client_details,
+)
+from services.masters import get_service_options_for_creation
 from services.masters_sync import (
     confirm_master_login,
     disconnect_masters_session,
@@ -58,6 +66,8 @@ PAGE_SIZE = 3
 admin_broadcast_drafts: dict[int, dict] = {}
 admin_create_drafts: dict[int, dict] = {}
 admin_resched_drafts: dict[int, dict] = {}
+admin_edit_client_drafts: dict[int, dict] = {}
+admin_clients_state: dict[int, dict] = {}
 
 RU_MONTHS = ["", "янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"]
 RU_WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
@@ -114,18 +124,20 @@ def format_dt(val) -> str:
 def admin_menu_keyboard() -> str:
     """
     VK Inline Keyboard: strictly <= 6 rows and <= 10 buttons.
-    Total: 4 rows, 7 buttons.
+    Total: 5 rows, 8 buttons.
     """
     kb = Keyboard(inline=True)
     kb.add(Callback("📋 Календарь записей", {"cmd": "admin_appts", "filter": "all", "offset": 0}))
     kb.row()
     kb.add(Callback("➕ Новая запись", {"cmd": "admin_create_start"}))
+    kb.add(Callback("👥 Клиенты", {"cmd": "admin_clients", "offset": 0}))
+    kb.row()
     kb.add(Callback("🕒 Рабочий график", {"cmd": "admin_sched", "offset": 0}))
-    kb.row()
     kb.add(Callback("⏳ Ожидающие", {"cmd": "admin_pending", "offset": 0}))
-    kb.add(Callback("💰 Бонусы", {"cmd": "admin_rewards", "offset": 0}))
     kb.row()
+    kb.add(Callback("💰 Бонусы", {"cmd": "admin_rewards", "offset": 0}))
     kb.add(Callback("🔄 Masters", {"cmd": "admin_masters"}))
+    kb.row()
     kb.add(Callback("📢 Рассылка", {"cmd": "admin_broadcast"}))
     return kb.get_json()
 
@@ -215,8 +227,13 @@ def admin_appt_card_keyboard(appt: dict, current_filter: str, offset: int) -> st
         if not appt.get("client_confirmed"):
             kb.add(Callback("✅ Подтвердить запись", {"cmd": "admin_confirm_appt", "id": appt_id, "filter": current_filter, "offset": offset}))
             kb.row()
+        kb.add(Callback("✏️ Указать имя", {"cmd": "admin_edit_client", "id": appt_id, "filter": current_filter, "offset": offset}))
         kb.add(Callback("🗓 Перенести", {"cmd": "admin_resched_start", "id": appt_id, "filter": current_filter, "offset": offset}))
+        kb.row()
         kb.add(Callback("❌ Отменить", {"cmd": "admin_cancel_appt", "id": appt_id, "filter": current_filter, "offset": offset}))
+        kb.row()
+    else:
+        kb.add(Callback("✏️ Указать имя", {"cmd": "admin_edit_client", "id": appt_id, "filter": current_filter, "offset": offset}))
         kb.row()
 
     kb.add(Callback("⬅️ К списку записей", {"cmd": "admin_appts", "filter": current_filter, "offset": offset}))
@@ -803,22 +820,18 @@ async def admin_create_start_handler(event: MessageEvent):
 
     admin_create_drafts[event.user_id] = {"step": "service"}
 
+    opts = get_service_options_for_creation()
     kb = Keyboard(inline=True)
-    kb.add(Callback("Мужская стрижка (1000 ₽)", {"cmd": "admin_create_svc", "svc": "Мужская стрижка", "price": 1000}))
-    kb.row()
-    kb.add(Callback("Стрижка + Борода (1400 ₽)", {"cmd": "admin_create_svc", "svc": "Стрижка + Борода", "price": 1400}))
-    kb.row()
-    kb.add(Callback("Стрижка бороды (600 ₽)", {"cmd": "admin_create_svc", "svc": "Стрижка бороды", "price": 600}))
-    kb.row()
-    kb.add(Callback("Отец + Сын (1800 ₽)", {"cmd": "admin_create_svc", "svc": "Отец + Сын", "price": 1800}))
-    kb.row()
+    for o in opts[:3]:
+        kb.add(Callback(f"{o['name']} ({o['price']} ₽)"[:40], {"cmd": "admin_create_svc", "svc": o["name"], "price": o["price"]}))
+        kb.row()
     kb.add(Callback("✏️ Другая услуга", {"cmd": "admin_create_svc_custom"}))
     kb.row()
     kb.add(Callback("⬅️ Отмена", {"cmd": "admin_menu"}))
 
     try:
         await event.edit_message(
-            message="➕ Создание новой записи мастером\n\nШаг 1 из 4: Выберите услугу или введите другое название:",
+            message="➕ Создание новой записи мастером\n\nШаг 1 из 4: Выберите услугу из Masters или введите другое название:",
             keyboard=kb.get_json(),
         )
     except Exception:
@@ -839,8 +852,8 @@ async def admin_create_svc_handler(event: MessageEvent):
 
     payload = get_payload(event)
     draft = admin_create_drafts.setdefault(event.user_id, {})
-    draft["service"] = payload.get("svc", "Мужская стрижка")
-    draft["price"] = int(payload.get("price", 1000))
+    draft["service"] = payload.get("svc", "Стрижка (МУЖСКАЯ)")
+    draft["price"] = int(payload.get("price", 2300))
     draft["step"] = "day"
 
     now = get_current_saratov_time()
@@ -1496,6 +1509,125 @@ async def admin_broadcast_send(event: MessageEvent):
         pass
 
 
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_clients",
+)
+async def admin_clients_handler(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    payload = get_payload(event)
+    action = payload.get("action")
+    if action == "import":
+        admin_clients_state[event.user_id] = {"action": "awaiting_import"}
+        kb = Keyboard(inline=True)
+        kb.add(Callback("⬅️ Назад", {"cmd": "admin_clients", "offset": 0}))
+        msg = (
+            "📥 Импорт базы клиентов из Masters\n\n"
+            "Отправьте список клиентов сообщением в чат:\n"
+            "Иван Иванов +79271234567\n"
+            "Алексей 89053214455"
+        )
+        try:
+            await event.edit_message(message=msg, keyboard=kb.get_json())
+        except Exception:
+            pass
+        await safe_event_answer(event)
+        return
+
+    if action == "search":
+        admin_clients_state[event.user_id] = {"action": "awaiting_search"}
+        kb = Keyboard(inline=True)
+        kb.add(Callback("⬅️ Назад", {"cmd": "admin_clients", "offset": 0}))
+        try:
+            await event.edit_message(message="🔍 Поиск клиента в базе\n\nОтправьте в чат имя или телефон клиента:", keyboard=kb.get_json())
+        except Exception:
+            pass
+        await safe_event_answer(event)
+        return
+
+    offset = int(payload.get("offset", 0))
+    stats = get_clients_stats()
+    clients, total = get_clients_page(offset=offset, limit=4)
+
+    text = f"👥 База клиентов ({stats['total']} всего, с телефонами: {stats['with_phone']}):\n\n"
+    if not clients:
+        text += "В базе пока нет клиентов. Нажмите «📥 Импорт», чтобы добавить контакты."
+    else:
+        for c in clients:
+            c_name = f"{c['first_name'] or ''} {c['last_name'] or ''}".strip() or "Без имени"
+            c_phone = c.get("phone") or "—"
+            text += f"• {c_name} — {c_phone}\n"
+
+    kb = Keyboard(inline=True)
+    if offset > 0:
+        kb.add(Callback("◀️ Назад", {"cmd": "admin_clients", "offset": max(0, offset - 4)}))
+    if offset + 4 < total:
+        kb.add(Callback("Вперёд ▶️", {"cmd": "admin_clients", "offset": offset + 4}))
+    if offset > 0 or offset + 4 < total:
+        kb.row()
+
+    kb.add(Callback("📥 Импорт из Masters", {"cmd": "admin_clients", "action": "import"}))
+    kb.add(Callback("🔍 Поиск", {"cmd": "admin_clients", "action": "search"}))
+    kb.row()
+    kb.add(Callback("⬅️ Меню админки", {"cmd": "admin_menu"}))
+
+    try:
+        await event.edit_message(message=text, keyboard=kb.get_json())
+    except Exception:
+        pass
+    await safe_event_answer(event)
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_edit_client",
+)
+async def admin_edit_client_handler(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    payload = get_payload(event)
+    appt_id = int(payload.get("id", 0))
+    current_filter = payload.get("filter", "today")
+    offset = int(payload.get("offset", 0))
+
+    appt = get_appointment(appt_id)
+    if not appt:
+        await event.show_snackbar("Запись не найдена")
+        return
+
+    admin_edit_client_drafts[event.user_id] = {
+        "appt_id": appt_id,
+        "current_filter": current_filter,
+        "offset": offset,
+    }
+
+    cur_name = appt.get("client_name") or "Клиент"
+    cur_phone = appt.get("phone") or "—"
+
+    text = (
+        f"✏️ Указание имени клиента для записи #{appt_id}\n\n"
+        f"Текущее имя: {cur_name}\n"
+        f"Текущий телефон: {cur_phone}\n\n"
+        "👉 Отправьте в чат имя (или имя и номер телефона) клиента:\n"
+        "Например: Алексей или Алексей +79271234567"
+    )
+    kb = Keyboard(inline=True)
+    kb.add(Callback("⬅️ Отмена", {"cmd": "admin_appt_detail", "id": appt_id, "filter": current_filter, "offset": offset}))
+
+    try:
+        await event.edit_message(message=text, keyboard=kb.get_json())
+    except Exception:
+        pass
+    await safe_event_answer(event)
+
+
 def _has_active_vk_draft(message: Message) -> bool:
     uid = message.from_id
     return (
@@ -1503,6 +1635,8 @@ def _has_active_vk_draft(message: Message) -> bool:
         or uid in admin_broadcast_drafts
         or uid in admin_resched_drafts
         or uid in admin_create_drafts
+        or uid in admin_edit_client_drafts
+        or uid in admin_clients_state
     )
 
 
@@ -1547,7 +1681,72 @@ async def handle_vk_text_messages(message: Message):
     if not is_admin(user_id):
         return
 
-    # 3. Broadcast draft text
+    # 3. Client name edit on appointment
+    if user_id in admin_edit_client_drafts:
+        edit_draft = admin_edit_client_drafts.pop(user_id)
+        appt_id = edit_draft["appt_id"]
+        current_filter = edit_draft["current_filter"]
+        offset = edit_draft["offset"]
+
+        phone_match = re.search(r"(\+?[78][\s\-\(]*\d{3}[\s\-\)]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}|\b9\d{9}\b|\b\d{10,11}\b)", raw_text)
+        client_phone = None
+        if phone_match:
+            client_phone = phone_match.group(1)
+            client_name = (raw_text[:phone_match.start()] + " " + raw_text[phone_match.end():]).strip(" :;,-")
+            client_name = re.sub(r"\s+", " ", client_name).strip()
+        else:
+            client_name = raw_text.strip()
+
+        if not client_name:
+            client_name = "Клиент"
+
+        ok, msg = update_appointment_client_details(appt_id, client_name, client_phone)
+        appt = get_appointment(appt_id)
+
+        kb = Keyboard(inline=True)
+        kb.add(Callback("📋 К карточке", {"cmd": "admin_appt_detail", "id": appt_id, "filter": current_filter, "offset": offset}))
+        kb.row()
+        kb.add(Callback("⬅️ К записям", {"cmd": "admin_appts", "filter": current_filter, "offset": offset}))
+
+        await message.answer(
+            f"✅ Имя клиента обновлено!\n\n👤 Клиент: {client_name}\n📱 Телефон: {appt.get('phone', '—')}",
+            keyboard=kb.get_json(),
+        )
+        return
+
+    # 4. Clients search / import text
+    c_state = admin_clients_state.get(user_id)
+    if c_state:
+        action = c_state.get("action")
+        if action == "awaiting_search":
+            admin_clients_state.pop(user_id, None)
+            clients, total = get_clients_page(offset=0, limit=4, search=raw_text)
+            text = f"🔍 Результаты поиска «{raw_text}» (найдено: {total}):\n\n"
+            if not clients:
+                text += "Клиенты не найдены."
+            else:
+                for c in clients:
+                    c_name = f"{c['first_name'] or ''} {c['last_name'] or ''}".strip() or "Без имени"
+                    text += f"• {c_name} — {c.get('phone', '—')}\n"
+            kb = Keyboard(inline=True)
+            kb.add(Callback("🔍 Новый поиск", {"cmd": "admin_clients", "action": "search"}))
+            kb.add(Callback("👥 Вся база", {"cmd": "admin_clients", "offset": 0}))
+            await message.answer(text, keyboard=kb.get_json())
+            return
+
+        if action == "awaiting_import":
+            admin_clients_state.pop(user_id, None)
+            added, updated, msg = import_clients_from_text(raw_text)
+            kb = Keyboard(inline=True)
+            kb.add(Callback("👥 База клиентов", {"cmd": "admin_clients", "offset": 0}))
+            kb.add(Callback("⬅️ Меню админки", {"cmd": "admin_menu"}))
+            await message.answer(
+                f"✅ Импорт клиентов завершён!\n\n• Добавлено новых клиентов: {added}\n• Обновлено: {updated}\n• {msg}",
+                keyboard=kb.get_json(),
+            )
+            return
+
+    # 5. Broadcast draft text
     if admin_broadcast_drafts.get(user_id, {}).get("step") == "awaiting_text":
         recipients = get_broadcast_recipients("vk")
         count = len(recipients)
@@ -1572,7 +1771,7 @@ async def handle_vk_text_messages(message: Message):
         await message.answer(preview, keyboard=kb.get_json())
         return
 
-    # 4. Reschedule custom time
+    # 6. Reschedule custom time
     if admin_resched_drafts.get(user_id, {}).get("step") == "awaiting_custom_time":
         draft = admin_resched_drafts.pop(user_id)
         m = re.match(r"^(\d{1,2})[:.-](\d{2})$", raw_text)
@@ -1614,14 +1813,14 @@ async def handle_vk_text_messages(message: Message):
         await message.answer(f"✅ Запись #{appt_id} успешно перенесена на {format_dt(new_dt)}!", keyboard=kb.get_json())
         return
 
-    # 5. Create appointment steps
+    # 7. Create appointment steps
     create_draft = admin_create_drafts.get(user_id)
     if create_draft:
         step = create_draft.get("step")
 
         if step == "awaiting_custom_service":
             create_draft["service"] = raw_text
-            create_draft["price"] = 1000
+            create_draft["price"] = 2300
             create_draft["step"] = "day"
 
             now = get_current_saratov_time()
@@ -1656,7 +1855,7 @@ async def handle_vk_text_messages(message: Message):
             tokens = raw_text.split()
             phone = ""
             name = "Клиент"
-            custom_price = create_draft.get("price", 1000)
+            custom_price = create_draft.get("price", 2300)
 
             for token in tokens:
                 digits = re.sub(r"\D", "", token)
