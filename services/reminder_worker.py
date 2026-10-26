@@ -7,6 +7,7 @@ from config import ADMIN_IDS
 from services.appointments import (
     SARATOV_TZ,
     get_due_2h_reminders,
+    get_due_confirmation_followup_reminders,
     get_due_evening_reminders,
     get_due_retention_reminders,
     mark_reminder_sent,
@@ -15,11 +16,21 @@ from services.appointments import (
 logger = logging.getLogger(__name__)
 
 
-def _get_evening_reminder_keyboard(appointment_id: int) -> str:
+def _get_confirmation_keyboard(appointment_id: int) -> str:
     kb = Keyboard(inline=True)
+    kb.add(Callback("✅ Подтверждаю запись", {"cmd": "appt_confirm", "id": appointment_id}))
+    kb.row()
     kb.add(Callback("❌ Отменить запись", {"cmd": "appt_cancel", "id": appointment_id}))
     kb.row()
     kb.add(OpenLink(link="https://yandex.ru/maps/-/CDu~v-7x", label="📍 Как добраться"))
+    return kb.get_json()
+
+
+def _get_confirmed_2h_keyboard(appointment_id: int) -> str:
+    kb = Keyboard(inline=True)
+    kb.add(OpenLink(link="https://yandex.ru/maps/-/CDu~v-7x", label="📍 Как добраться"))
+    kb.row()
+    kb.add(Callback("❌ Отменить запись", {"cmd": "appt_cancel", "id": appointment_id}))
     return kb.get_json()
 
 
@@ -84,13 +95,13 @@ async def run_reminder_worker(api: API, platform: str = "vk"):
                     f"✂️ Услуги: {appt['services']}\n"
                     f"💰 Стоимость: {appt['total_price']} ₽\n"
                     "📍 Адрес: Саратов, ул. имени Е.И. Пугачёва, 110\n\n"
-                    "Если твои планы изменились, пожалуйста, нажми кнопку ниже:"
+                    "👉 Пожалуйста, подтверди свой визит нажатием кнопки ниже или отмени запись, если твои планы изменились:"
                 )
                 try:
                     await api.messages.send(
                         user_id=target_user_id,
                         message=text,
-                        keyboard=_get_evening_reminder_keyboard(appt["id"]),
+                        keyboard=_get_confirmation_keyboard(appt["id"]),
                         random_id=0,
                     )
                     mark_reminder_sent(appt["id"], "evening")
@@ -98,7 +109,41 @@ async def run_reminder_worker(api: API, platform: str = "vk"):
                 except Exception as send_err:
                     logger.warning("Ошибка отправки вечернего напоминания #%s: %s", appt["id"], send_err)
 
-            # 2. 2h express reminder
+            # 2. Morning follow-up reminder (on visit day, >= 09:00, if not confirmed)
+            morning_due = get_due_confirmation_followup_reminders(platform=platform)
+            for appt in morning_due:
+                target_user_id = _resolve_platform_user_id(appt, platform)
+                if not target_user_id:
+                    mark_reminder_sent(appt["id"], "morning")
+                    continue
+
+                dt = appt["appointment_time"]
+                if isinstance(dt, str):
+                    dt = datetime.datetime.fromisoformat(dt)
+                dt_local = dt.astimezone(SARATOV_TZ) if dt.tzinfo else dt
+                time_str = dt_local.strftime("%H:%M")
+
+                text = (
+                    "⚠️ Подтверждение записи на сегодня\n\n"
+                    f"Ты записан сегодня в {time_str}, но ещё не подтвердил свой визит.\n\n"
+                    f"✂️ Услуги: {appt['services']}\n"
+                    f"💰 Стоимость: {appt['total_price']} ₽\n"
+                    "📍 Адрес: Саратов, ул. имени Е.И. Пугачёва, 110\n\n"
+                    "👉 Пожалуйста, подтверди запись, чтобы мастер держал за тобой время, или отмени её, если не сможешь прийти:"
+                )
+                try:
+                    await api.messages.send(
+                        user_id=target_user_id,
+                        message=text,
+                        keyboard=_get_confirmation_keyboard(appt["id"]),
+                        random_id=0,
+                    )
+                    mark_reminder_sent(appt["id"], "morning")
+                    logger.info("Отправлено утреннее напоминание о подтверждении клиенту #%s (appt #%s)", target_user_id, appt["id"])
+                except Exception as send_err:
+                    logger.warning("Ошибка отправки утреннего напоминания #%s: %s", appt["id"], send_err)
+
+            # 3. 2h express reminder
             two_h_due = get_due_2h_reminders(platform=platform)
             for appt in two_h_due:
                 target_user_id = _resolve_platform_user_id(appt, platform)
@@ -112,25 +157,40 @@ async def run_reminder_worker(api: API, platform: str = "vk"):
                 dt_local = dt.astimezone(SARATOV_TZ) if dt.tzinfo else dt
                 time_str = dt_local.strftime("%H:%M")
 
-                text = (
-                    "⏰ До твоей записи осталось 2 часа!\n\n"
-                    f"Ждём тебя сегодня в {time_str}.\n"
-                    f"✂️ Услуги: {appt['services']}\n"
-                    "📍 Адрес: Саратов, ул. имени Е.И. Пугачёва, 110\n\n"
-                    "До скорой встречи!"
-                )
+                is_confirmed = bool(appt.get("client_confirmed"))
+                if is_confirmed:
+                    text = (
+                        "⏰ До твоей записи осталось 2 часа!\n\n"
+                        f"Ждём тебя сегодня в {time_str}.\n"
+                        f"✂️ Услуги: {appt['services']}\n"
+                        "📍 Адрес: Саратов, ул. имени Е.И. Пугачёва, 110\n\n"
+                        "Твоя запись подтверждена, мастер готов и ждёт тебя! ✂️"
+                    )
+                    keyboard = _get_confirmed_2h_keyboard(appt["id"])
+                else:
+                    text = (
+                        "⏰ До твоей записи осталось 2 часа!\n\n"
+                        f"Ждём тебя сегодня в {time_str}.\n"
+                        f"✂️ Услуги: {appt['services']}\n"
+                        "📍 Адрес: Саратов, ул. имени Е.И. Пугачёва, 110\n\n"
+                        "⚠️ Внимание: запись всё ещё не подтверждена!\n"
+                        "Пожалуйста, подтверди визит или отмени запись, чтобы мастер не ждал впустую:"
+                    )
+                    keyboard = _get_confirmation_keyboard(appt["id"])
+
                 try:
                     await api.messages.send(
                         user_id=target_user_id,
                         message=text,
+                        keyboard=keyboard,
                         random_id=0,
                     )
                     mark_reminder_sent(appt["id"], "2h")
-                    logger.info("Отправлено 2ч напоминание клиенту #%s (appt #%s)", target_user_id, appt["id"])
+                    logger.info("Отправлено 2ч напоминание клиенту #%s (appt #%s, confirmed=%s)", target_user_id, appt["id"], is_confirmed)
                 except Exception as send_err:
                     logger.warning("Ошибка отправки 2ч напоминания #%s: %s", appt["id"], send_err)
 
-            # 3. 2.5 weeks retention reminder
+            # 4. 2.5 weeks retention reminder
             retention_due = get_due_retention_reminders(platform=platform)
             for appt in retention_due:
                 target_user_id = _resolve_platform_user_id(appt, platform)

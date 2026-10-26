@@ -3,13 +3,15 @@ import json
 import logging
 from typing import Any
 
-from vkbottle import Callback, GroupEventType, Keyboard
+from vkbottle import Callback, GroupEventType, Keyboard, OpenLink
 from vkbottle.bot import BotLabeler, Message, MessageEvent
 
 from config import ADMIN_IDS, BOOKING_URL
+from handlers.referrals import safe_event_answer
 from services.appointments import (
     SARATOV_TZ,
     cancel_appointment,
+    confirm_appointment_by_client,
     create_or_update_appointment,
 )
 from keyboards.booking import (
@@ -360,18 +362,81 @@ async def sms_code_handler(message: Message):
 @labeler.raw_event(
     GroupEventType.MESSAGE_EVENT,
     dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "appt_confirm",
+)
+async def callback_confirm_appointment(event: MessageEvent):
+    payload = get_payload(event)
+    appt_id = payload.get("id")
+    if not appt_id:
+        await safe_event_answer(event, "Некорректная запись")
+        return
+
+    success, msg, appt = confirm_appointment_by_client(int(appt_id))
+    if not success:
+        await safe_event_answer(event, msg)
+        return
+
+    dt_str = ""
+    if appt and appt.get("appointment_time"):
+        dt = appt["appointment_time"]
+        if isinstance(dt, str):
+            dt = datetime.datetime.fromisoformat(dt)
+        dt_local = dt.astimezone(SARATOV_TZ) if dt.tzinfo else dt
+        dt_str = dt_local.strftime("%d.%m.%Y в %H:%M")
+
+    kb = Keyboard(inline=True)
+    kb.add(OpenLink(link="https://yandex.ru/maps/-/CDu~v-7x", label="📍 Как добраться"))
+    kb.row()
+    kb.add(Callback("❌ Отменить запись", {"cmd": "appt_cancel", "id": int(appt_id)}))
+
+    try:
+        await event.edit_message(
+            message=(
+                "✅ Запись подтверждена!\n\n"
+                f"Спасибо за подтверждение! Ждём вас {dt_str} ✂️\n"
+                "📍 Адрес: Саратов, ул. имени Е.И. Пугачёва, 110"
+            ),
+            keyboard=kb.get_json(),
+        )
+    except Exception as e:
+        logger.warning("Error editing confirmed appt msg: %s", e)
+
+    await safe_event_answer(event, "Запись подтверждена! Ждём вас.")
+
+    if appt:
+        for admin_id in ADMIN_IDS:
+            try:
+                await event.ctx_api.messages.send(
+                    user_id=admin_id,
+                    random_id=0,
+                    message=(
+                        "✅ Клиент подтвердил запись (ВКонтакте)!\n\n"
+                        f"👤 Клиент: {appt.get('client_name') or 'Клиент'}\n"
+                        f"📱 Телефон: {appt.get('phone')}\n"
+                        f"✂️ Услуги: {appt.get('services')}\n"
+                        f"📅 Время: {dt_str}\n"
+                        "Клиент точно придёт к назначенному времени."
+                    ),
+                )
+            except Exception as e:
+                logger.error("Failed to notify VK admin %s: %s", admin_id, e)
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
     func=lambda event: get_payload(event).get("cmd") == "appt_cancel",
 )
 async def callback_cancel_appointment(event: MessageEvent):
     payload = get_payload(event)
     appt_id = payload.get("id")
     if not appt_id:
-        await event.show_snackbar("Некорректная запись")
+        await safe_event_answer(event, "Некорректная запись")
         return
 
     success, msg, appt = cancel_appointment(int(appt_id))
     if not success:
-        await event.show_snackbar(msg)
+        await safe_event_answer(event, msg)
         return
 
     try:
@@ -384,7 +449,7 @@ async def callback_cancel_appointment(event: MessageEvent):
     except Exception as e:
         logger.warning("Error editing cancelled appt msg: %s", e)
 
-    await event.show_snackbar("Запись отменена.")
+    await safe_event_answer(event, "Запись отменена.")
 
     if appt:
         dt_str = str(appt.get("appointment_time", ""))
