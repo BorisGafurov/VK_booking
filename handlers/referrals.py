@@ -21,6 +21,7 @@ from services.appointments import (
     get_appointment,
     get_appointments_counts,
     get_current_saratov_time,
+    get_day_time_slots_status,
     get_master_appointments,
     get_master_day_schedule,
     get_upcoming_days_schedule,
@@ -929,27 +930,88 @@ async def admin_create_day_handler(event: MessageEvent):
     draft["day_key"] = day_key
     draft["step"] = "time"
 
-    hours = ["10:00", "12:00", "14:00", "16:00", "18:00", "19:00"]
+    slots_info = await asyncio.to_thread(get_day_time_slots_status, day_key)
+    free_slots = slots_info.get("free_slots", [])
+    busy_appts = slots_info.get("busy_appts", [])
+
+    lines = [f"➕ Шаг 3 из 4: Выберите время на {day_key}:\n"]
+    if free_slots:
+        lines.append(f"🟢 Свободно: {', '.join(free_slots)}")
+    else:
+        lines.append("⚠️ На этот день нет свободных окон в Masters")
+
+    if busy_appts:
+        lines.append("\n🔴 Уже занято:")
+        for b in busy_appts:
+            c_name = b["client_name"] or "Клиент"
+            lines.append(f"• {b['time']} — {c_name} ({b['services']})")
+
+    lines.append("\nВыберите свободное окно 🟢 или занятое 🔴 для овербукинга:")
+    msg_text = "\n".join(lines)
+
     kb = Keyboard(inline=True)
     count = 0
-    for h in hours:
-        kb.add(Callback(h, {"cmd": "admin_create_time", "time": h}))
+    for s in free_slots[:6]:
+        kb.add(Callback(f"🟢 {s}", {"cmd": "admin_create_time", "time": s}))
         count += 1
         if count % 3 == 0:
             kb.row()
+    if count % 3 != 0:
+        kb.row()
 
-    kb.add(Callback("✏️ Другое время (08:30, 22:00...)", {"cmd": "admin_create_time_custom"}))
+    for b in busy_appts[:2]:
+        kb.add(Callback(f"🔴 {b['time']} (занято)"[:40], {"cmd": "admin_create_busy", "time": b["time"]}))
+    if busy_appts:
+        kb.row()
+
+    kb.add(Callback("✏️ Своё время (08:30...)", {"cmd": "admin_create_time_custom"}))
     kb.row()
     kb.add(Callback("⬅️ Назад к датам", {"cmd": "admin_create_start"}))
 
     try:
         await event.edit_message(
-            message=f"➕ Шаг 3 из 4: Выберите время на {day_key}:\n(можно записать клиента и вне стандартного рабочего графика)",
+            message=msg_text,
             keyboard=kb.get_json(),
         )
     except Exception:
         pass
 
+    await safe_event_answer(event)
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_create_busy",
+)
+async def admin_create_busy_handler(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    payload = get_payload(event)
+    time_val = payload.get("time", "")
+    draft = admin_create_drafts.setdefault(event.user_id, {})
+    day_key = draft.get("day_key", "")
+
+    slots_info = await asyncio.to_thread(get_day_time_slots_status, day_key)
+    b_appt = next((b for b in slots_info.get("busy_appts", []) if b["time"] == time_val), None)
+    details = f"{b_appt['client_name']} ({b_appt['services']})" if b_appt else "запись из Masters"
+
+    text = (
+        f"⚠️ Внимание: на {day_key} в {time_val} уже есть запись!\n\n"
+        f"• {time_val} — {details}\n\n"
+        "Вы действительно хотите записать ещё одного клиента на это же время (овербукинг)?"
+    )
+    kb = Keyboard(inline=True)
+    kb.add(Callback(f"⚠️ Да, записать на {time_val}"[:40], {"cmd": "admin_create_time", "time": time_val}))
+    kb.row()
+    kb.add(Callback("⬅️ Выбрать другое время", {"cmd": "admin_create_day", "day": day_key}))
+
+    try:
+        await event.edit_message(message=text, keyboard=kb.get_json())
+    except Exception:
+        pass
     await safe_event_answer(event)
 
 
