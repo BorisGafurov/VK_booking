@@ -2061,9 +2061,7 @@ async def handle_vk_text_messages(message: Message):
             return
 
         if step == "awaiting_client_info":
-            tokens = raw_text.split()
             phone = ""
-            name = "Клиент"
             custom_price = create_draft.get("price", 2300)
 
             for token in tokens:
@@ -2072,16 +2070,21 @@ async def handle_vk_text_messages(message: Message):
                     phone = normalize_phone(token)
                 elif token.isdigit() and int(token) >= 100:
                     custom_price = int(token)
-                elif not token.isdigit():
-                    name = token
 
             if not phone:
                 await message.answer("⚠️ Пожалуйста, укажите номер телефона клиента (например: +79991234567 Иван):")
                 return
 
-            name_parts = [t for t in tokens if not re.sub(r"\D", "", t).isdigit() or len(re.sub(r"\D", "", t)) < 5]
-            if name_parts:
-                name = " ".join(name_parts)
+            name_parts = []
+            for t in tokens:
+                digits = re.sub(r"\D", "", t)
+                if len(digits) >= 10:
+                    continue
+                if t.isdigit() and (int(t) >= 100 or int(t) == custom_price):
+                    continue
+                name_parts.append(t)
+
+            name = " ".join(name_parts) if name_parts else "Клиент"
 
             create_draft["phone"] = phone
             create_draft["name"] = name

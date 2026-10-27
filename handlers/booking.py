@@ -1,6 +1,8 @@
+import asyncio
 import datetime
 import json
 import logging
+import secrets
 from typing import Any
 
 from vkbottle import Callback, GroupEventType, Keyboard, OpenLink
@@ -8,6 +10,28 @@ from vkbottle.bot import BotLabeler, Message, MessageEvent
 
 from config import ADMIN_IDS, BOOKING_URL
 from handlers.referrals import safe_event_answer
+
+
+async def _resolve_vk_client_name(api, user_id: int) -> str:
+    """Resolve real first and last name for VK user instead of using id123456."""
+    try:
+        from services.referrals import get_user_by_platform_id
+        u = get_user_by_platform_id(user_id, platform="vk")
+        if u and u.get("first_name"):
+            name = f"{u['first_name']} {u.get('last_name') or ''}".strip()
+            if name:
+                return name
+    except Exception:
+        pass
+    try:
+        users = await api.users.get(user_ids=[user_id])
+        if users:
+            name = f"{users[0].first_name} {users[0].last_name}".strip()
+            if name:
+                return name
+    except Exception:
+        pass
+    return "Клиент"
 from services.appointments import (
     SARATOV_TZ,
     cancel_appointment,
@@ -147,7 +171,7 @@ async def callback_book_services(event: MessageEvent):
 async def callback_book_days(event: MessageEvent):
     user_id = event.user_id
     current = user_selected_services.get(user_id, {"hair"})
-    schedule = get_schedule(current)
+    schedule = await asyncio.to_thread(get_schedule, current)
 
     if not schedule:
         try:
@@ -187,7 +211,7 @@ async def callback_book_day(event: MessageEvent):
     user_selected_day[user_id] = day_key
 
     current = user_selected_services.get(user_id, {"hair"})
-    schedule = get_schedule(current)
+    schedule = await asyncio.to_thread(get_schedule, current)
     day_data = schedule.get(day_key)
     slots = day_data["slots"] if day_data else []
 
@@ -257,7 +281,7 @@ async def _finalize_successful_vk_booking(
         try:
             await api.messages.send(
                 user_id=admin_id,
-                random_id=0,
+                random_id=secrets.randbits(31),
                 message=(
                     "🔥 Новая онлайн-запись через бота (ВКонтакте)!\n\n"
                     f"👤 Клиент: {client_name}\n"
@@ -306,8 +330,10 @@ async def callback_book_slot(event: MessageEvent):
         pass
 
     current = user_selected_services.get(user_id, {"hair"})
-    client_name = f"id{user_id}"
-    success, msg, session_data = initiate_booking(phone, current, timestamp, client_name=client_name)
+    client_name = await _resolve_vk_client_name(event.ctx_api, user_id)
+    success, msg, session_data = await asyncio.to_thread(
+        initiate_booking, phone, current, timestamp, client_name=client_name
+    )
 
     if not success or not session_data:
         try:
@@ -367,7 +393,7 @@ async def sms_code_handler(message: Message):
         return
 
     code = message.text.strip()
-    success, msg = confirm_sms_code(session_data, code)
+    success, msg = await asyncio.to_thread(confirm_sms_code, session_data, code)
 
     if not success:
         await message.answer(
@@ -377,7 +403,7 @@ async def sms_code_handler(message: Message):
         return
 
     # Successfully booked!
-    client_name = f"id{message.from_id}"
+    client_name = await _resolve_vk_client_name(message.ctx_api, user_id)
     await _finalize_successful_vk_booking(message.ctx_api, user_id, session_data, client_name, message)
 
 
@@ -393,7 +419,9 @@ async def callback_confirm_appointment(event: MessageEvent):
         await safe_event_answer(event, "Некорректная запись")
         return
 
-    success, msg, appt = confirm_appointment_by_client(int(appt_id))
+    success, msg, appt = confirm_appointment_by_client(
+        int(appt_id), platform="vk", platform_user_id=event.user_id
+    )
     if not success:
         await safe_event_answer(event, msg)
         return
@@ -430,7 +458,7 @@ async def callback_confirm_appointment(event: MessageEvent):
             try:
                 await event.ctx_api.messages.send(
                     user_id=admin_id,
-                    random_id=0,
+                    random_id=secrets.randbits(31),
                     message=(
                         "✅ Клиент подтвердил запись (ВКонтакте)!\n\n"
                         f"👤 Клиент: {appt.get('client_name') or 'Клиент'}\n"
@@ -456,7 +484,9 @@ async def callback_cancel_appointment(event: MessageEvent):
         await safe_event_answer(event, "Некорректная запись")
         return
 
-    success, msg, appt = cancel_appointment(int(appt_id))
+    success, msg, appt = cancel_appointment(
+        int(appt_id), platform="vk", platform_user_id=event.user_id
+    )
     if not success:
         await safe_event_answer(event, msg)
         return
@@ -479,7 +509,7 @@ async def callback_cancel_appointment(event: MessageEvent):
             try:
                 await event.ctx_api.messages.send(
                     user_id=admin_id,
-                    random_id=0,
+                    random_id=secrets.randbits(31),
                     message=(
                         "⚠️ Клиент отменил запись (ВКонтакте)!\n\n"
                         f"👤 Клиент: {appt.get('client_name') or 'Клиент'}\n"
@@ -512,8 +542,10 @@ async def phone_message_handler(message: Message):
         dt = datetime.datetime.fromtimestamp(pending_ts, tz=SARATOV_TZ)
 
         await message.answer(f"⏳ Номер {phone} сохранён. Связываюсь с Masters для записи на {dt.strftime('%d.%m.%Y в %H:%M')}...")
-        client_name = f"id{user_id}"
-        success_init, msg_init, session_data = initiate_booking(phone, current, pending_ts, client_name=client_name)
+        client_name = await _resolve_vk_client_name(message.ctx_api, user_id)
+        success_init, msg_init, session_data = await asyncio.to_thread(
+            initiate_booking, phone, current, pending_ts, client_name=client_name
+        )
         if not success_init or not session_data:
             await message.answer(
                 f"⚠️ {msg_init}\n\nВы можете завершить бронирование напрямую через сайт:",
