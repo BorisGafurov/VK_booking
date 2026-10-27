@@ -491,7 +491,7 @@ async def admin_appts_handler(event: MessageEvent):
 @labeler.raw_event(
     GroupEventType.MESSAGE_EVENT,
     dataclass=MessageEvent,
-    func=lambda event: get_payload(event).get("cmd") == "admin_appt",
+    func=lambda event: get_payload(event).get("cmd") in ("admin_appt", "admin_appt_detail"),
 )
 async def admin_appt_detail_handler(event: MessageEvent):
     if not is_admin(event.user_id):
