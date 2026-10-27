@@ -41,6 +41,7 @@ from services.masters_sync import (
     confirm_master_login,
     disconnect_masters_session,
     get_active_masters_session,
+    get_suggested_master_phone,
     pending_master_logins,
     request_master_login,
     sync_masters_appointments,
@@ -1384,13 +1385,17 @@ async def admin_masters_status_vk(event: MessageEvent):
         kb.row()
         kb.add(Callback("⬅️ Меню админки", {"cmd": "admin_menu"}))
     else:
+        suggested_phone = get_suggested_master_phone()
         text = (
             "🔗 Подключение аккаунта Masters\n\n"
             "Бот может автоматически забирать все записи из твоего личного кабинета Masters "
             "и бесплатно рассылать клиентам напоминания о визите накануне вечером и за 2 часа.\n\n"
-            "Нажми кнопку ниже, чтобы отправить проверочный код на твой номер:"
+            f"📱 Номер мастера для входа: {suggested_phone}\n\n"
+            "Нажми кнопку ниже, чтобы отправить проверочный код по СМС, или укажи другой номер:"
         )
-        kb.add(Callback("📲 Запросить СМС-код для входа", {"cmd": "admin_masters_request"}))
+        kb.add(Callback(f"📲 СМС на {suggested_phone}", {"cmd": "admin_masters_request", "phone": suggested_phone}))
+        kb.row()
+        kb.add(Callback("✏️ Ввести другой номер", {"cmd": "admin_masters_enter_phone"}))
         kb.row()
         kb.add(Callback("⬅️ Меню админки", {"cmd": "admin_menu"}))
 
@@ -1405,6 +1410,34 @@ async def admin_masters_status_vk(event: MessageEvent):
 @labeler.raw_event(
     GroupEventType.MESSAGE_EVENT,
     dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_masters_enter_phone",
+)
+async def admin_masters_enter_phone_vk(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    user_id = event.user_id
+    pending_master_logins[user_id] = {"awaiting_phone": True}
+    kb = Keyboard(inline=True)
+    kb.add(Callback("⬅️ Назад", {"cmd": "admin_masters"}))
+    try:
+        await event.edit_message(
+            message=(
+                "📱 Введите номер телефона мастера\n\n"
+                "Напишите в ответном сообщении номер, зарегистрированный в сервисе Masters "
+                "(например, +79173225155):"
+            ),
+            keyboard=kb.get_json(),
+        )
+    except Exception:
+        pass
+    await safe_event_answer(event)
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
     func=lambda event: get_payload(event).get("cmd") == "admin_masters_request",
 )
 async def admin_masters_request_code_vk(event: MessageEvent):
@@ -1413,13 +1446,17 @@ async def admin_masters_request_code_vk(event: MessageEvent):
         return
 
     user_id = event.user_id
-    phone = get_user_phone(user_id, platform="vk")
+    payload = get_payload(event)
+    phone = payload.get("phone") or get_suggested_master_phone()
 
     if not phone:
         pending_master_logins[user_id] = {"awaiting_phone": True}
+        kb = Keyboard(inline=True)
+        kb.add(Callback("⬅️ Назад", {"cmd": "admin_masters"}))
         try:
             await event.edit_message(
-                message="📱 Введите номер телефона мастера\n\nНапишите номер, зарегистрированный в сервисе Masters (например, +79991234567):",
+                message="📱 Введите номер телефона мастера\n\nНапишите номер, зарегистрированный в сервисе Masters (например, +79173225155):",
+                keyboard=kb.get_json(),
             )
         except Exception:
             pass
@@ -1428,19 +1465,34 @@ async def admin_masters_request_code_vk(event: MessageEvent):
 
     success, msg, session_data = request_master_login(phone)
     if not success:
+        pending_master_logins[user_id] = {"awaiting_phone": True}
         kb = Keyboard(inline=True)
+        kb.add(Callback("✏️ Ввести номер вручную", {"cmd": "admin_masters_enter_phone"}))
+        kb.row()
         kb.add(Callback("⬅️ Назад", {"cmd": "admin_masters"}))
         try:
-            await event.edit_message(message=f"❌ {msg}\n\nПопробуйте ещё раз:", keyboard=kb.get_json())
+            await event.edit_message(
+                message=(
+                    f"❌ {msg}\n\n"
+                    "Проверьте номер или напишите другой номер телефона мастера в ответном сообщении:\n"
+                    "(например, +79173225155)"
+                ),
+                keyboard=kb.get_json(),
+            )
         except Exception:
             pass
         await safe_event_answer(event)
         return
 
     pending_master_logins[user_id] = session_data
+    kb = Keyboard(inline=True)
+    kb.add(Callback("✏️ Ввести другой номер", {"cmd": "admin_masters_enter_phone"}))
+    kb.row()
+    kb.add(Callback("⬅️ Отмена", {"cmd": "admin_masters"}))
     try:
         await event.edit_message(
             message=f"📩 Код подтверждения отправлен\n\nНа номер {session_data['phone_formatted']} отправлено СМС от Masters.\n\n👉 Напишите 4 цифры из СМС в ответном сообщении:",
+            keyboard=kb.get_json(),
         )
     except Exception:
         pass
@@ -1832,7 +1884,11 @@ async def handle_vk_text_messages(message: Message):
         if session_data and not session_data.get("awaiting_phone"):
             success, msg = confirm_master_login(session_data, raw_text)
             if not success:
-                await message.answer(f"❌ {msg}\n\nПопробуйте ввести код ещё раз:")
+                kb = Keyboard(inline=True)
+                kb.add(Callback("✏️ Ввести другой номер", {"cmd": "admin_masters_enter_phone"}))
+                kb.row()
+                kb.add(Callback("⬅️ Меню админки", {"cmd": "admin_menu"}))
+                await message.answer(f"❌ {msg}\n\nПопробуйте ввести код ещё раз:", keyboard=kb.get_json())
                 return
             pending_master_logins.pop(user_id, None)
             ok, count, sync_msg = sync_masters_appointments()
@@ -1845,18 +1901,39 @@ async def handle_vk_text_messages(message: Message):
             return
 
     # 2. Master phone input
-    if user_id in pending_master_logins and pending_master_logins.get(user_id, {}).get("awaiting_phone") and is_phone_number(raw_text):
-        success, msg, session_data = request_master_login(raw_text)
-        if not success:
-            await message.answer(f"❌ {msg}\n\nПопробуйте ввести другой номер телефона:")
+    if user_id in pending_master_logins and pending_master_logins.get(user_id, {}).get("awaiting_phone"):
+        if is_phone_number(raw_text):
+            await message.answer("⏳ Запрашиваю проверочный код в Masters...")
+            success, msg, session_data = request_master_login(raw_text)
+            if not success:
+                pending_master_logins[user_id] = {"awaiting_phone": True}
+                kb = Keyboard(inline=True)
+                kb.add(Callback("⬅️ Меню админки", {"cmd": "admin_menu"}))
+                await message.answer(
+                    f"❌ {msg}\n\nПопробуйте ввести номер телефона мастера ещё раз (например, +79173225155):",
+                    keyboard=kb.get_json(),
+                )
+                return
+            pending_master_logins[user_id] = session_data
+            kb = Keyboard(inline=True)
+            kb.add(Callback("✏️ Ввести другой номер", {"cmd": "admin_masters_enter_phone"}))
+            kb.row()
+            kb.add(Callback("⬅️ Меню админки", {"cmd": "admin_menu"}))
+            await message.answer(
+                f"📩 Код подтверждения отправлен\n\n"
+                f"На номер {session_data['phone_formatted']} отправлено СМС от Masters.\n\n"
+                "👉 Напишите 4 цифры из СМС в ответном сообщении:",
+                keyboard=kb.get_json(),
+            )
             return
-        pending_master_logins[user_id] = session_data
-        await message.answer(
-            f"📩 Код подтверждения отправлен\n\n"
-            f"На номер {session_data['phone_formatted']} отправлено СМС от Masters.\n\n"
-            "👉 Напишите 4 цифры из СМС в ответном сообщении:",
-        )
-        return
+        else:
+            kb = Keyboard(inline=True)
+            kb.add(Callback("⬅️ Меню админки", {"cmd": "admin_menu"}))
+            await message.answer(
+                "⚠️ Пожалуйста, введите корректный номер телефона мастера (например, +79173225155):",
+                keyboard=kb.get_json(),
+            )
+            return
 
     if not is_admin(user_id):
         return
