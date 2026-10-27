@@ -229,7 +229,7 @@ async def callback_book_day(event: MessageEvent):
 async def _finalize_successful_vk_booking(
     api,
     user_id: int,
-    session_data: dict[str, Any],
+    session_data: dict,
     client_name: str,
     target_event_or_msg,
 ):
