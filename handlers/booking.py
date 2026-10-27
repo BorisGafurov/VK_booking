@@ -202,6 +202,75 @@ async def callback_book_day(event: MessageEvent):
     await event.send_empty_answer()
 
 
+async def _finalize_successful_vk_booking(
+    api,
+    user_id: int,
+    session_data: dict[str, Any],
+    client_name: str,
+    target_event_or_msg,
+):
+    user_pending_booking.pop(user_id, None)
+    user_selected_slot.pop(user_id, None)
+    calc = session_data["calc"]
+    dt = datetime.datetime.fromtimestamp(session_data["timestamp"], tz=SARATOV_TZ)
+    phone = session_data["phone"]
+
+    appt_id = create_or_update_appointment(
+        phone=phone,
+        appointment_time=dt,
+        services=", ".join(calc["names"]),
+        total_price=calc["total_price"],
+        client_name=client_name,
+        platform="vk",
+        platform_user_id=user_id,
+        masters_id=session_data.get("appointment_id"),
+    )
+
+    cancel_kb = Keyboard(inline=True)
+    cancel_kb.add(Callback("❌ Отменить запись", {"cmd": "appt_cancel", "id": appt_id}))
+
+    text = (
+        f"🎉 Запись успешно подтверждена!\n\n"
+        f"✂️ Услуги: {', '.join(calc['names'])}\n"
+        f"💰 Стоимость: {calc['total_price']} ₽ ({calc['duration_text']})\n"
+        f"📅 Дата и время: {dt.strftime('%d.%m.%Y в %H:%M')}\n"
+        f"📍 Адрес: Саратов, ул. имени Е.И. Пугачёва, 110\n\n"
+        "Ждём вас! Мы пришлём напоминание накануне вечером и за 2 часа до визита."
+    )
+
+    if isinstance(target_event_or_msg, MessageEvent):
+        try:
+            await target_event_or_msg.edit_message(
+                message=text,
+                keyboard=cancel_kb.get_json(),
+            )
+        except Exception as e:
+            logger.warning("Error editing confirmed appt msg: %s", e)
+        await target_event_or_msg.send_empty_answer()
+    else:
+        await target_event_or_msg.answer(
+            message=text,
+            keyboard=cancel_kb.get_json(),
+        )
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await api.messages.send(
+                user_id=admin_id,
+                random_id=0,
+                message=(
+                    "🔥 Новая онлайн-запись через бота (ВКонтакте)!\n\n"
+                    f"👤 Клиент: {client_name}\n"
+                    f"📱 Телефон: {phone}\n"
+                    f"✂️ Услуги: {', '.join(calc['names'])}\n"
+                    f"📅 Время: {dt.strftime('%d.%m.%Y в %H:%M')}\n"
+                    f"💰 Сумма: {calc['total_price']} ₽"
+                ),
+            )
+        except Exception as e:
+            logger.error("Failed to notify VK admin %s: %s", admin_id, e)
+
+
 @labeler.raw_event(
     GroupEventType.MESSAGE_EVENT,
     dataclass=MessageEvent,
@@ -230,14 +299,15 @@ async def callback_book_slot(event: MessageEvent):
 
     try:
         await event.edit_message(
-            message="⏳ Связываюсь с Masters и отправляю проверочный код...",
+            message="⏳ Связываюсь с Masters...",
             keyboard=get_sms_keyboard(),
         )
     except Exception:
         pass
 
     current = user_selected_services.get(user_id, {"hair"})
-    success, msg, session_data = initiate_booking(phone, current, timestamp)
+    client_name = f"id{user_id}"
+    success, msg, session_data = initiate_booking(phone, current, timestamp, client_name=client_name)
 
     if not success or not session_data:
         try:
@@ -250,8 +320,12 @@ async def callback_book_slot(event: MessageEvent):
         await event.send_empty_answer()
         return
 
+    if not session_data.get("needs_sms", True):
+        await _finalize_successful_vk_booking(event.ctx_api, user_id, session_data, client_name, event)
+        return
+
     user_pending_booking[user_id] = session_data
-    dt = datetime.datetime.fromtimestamp(timestamp)
+    dt = datetime.datetime.fromtimestamp(timestamp, tz=SARATOV_TZ)
 
     try:
         await event.edit_message(
@@ -302,51 +376,9 @@ async def sms_code_handler(message: Message):
         )
         return
 
-    user_pending_booking.pop(user_id, None)
-    calc = session_data["calc"]
-    dt = datetime.datetime.fromtimestamp(session_data["timestamp"], tz=SARATOV_TZ)
-    phone = session_data["phone"]
-
-    appt_id = create_or_update_appointment(
-        phone=phone,
-        appointment_time=dt,
-        services=", ".join(calc["names"]),
-        total_price=calc["total_price"],
-        client_name=f"id{message.from_id}",
-        platform="vk",
-        platform_user_id=user_id,
-        masters_id=session_data.get("appointment_id"),
-    )
-
-    cancel_kb = Keyboard(inline=True)
-    cancel_kb.add(Callback("❌ Отменить запись", {"cmd": "appt_cancel", "id": appt_id}))
-
-    await message.answer(
-        f"🎉 Запись успешно подтверждена!\n\n"
-        f"✂️ Услуги: {', '.join(calc['names'])}\n"
-        f"💰 Стоимость: {calc['total_price']} ₽ ({calc['duration_text']})\n"
-        f"📅 Дата и время: {dt.strftime('%d.%m.%Y в %H:%M')}\n"
-        f"📍 Адрес: Саратов, ул. имени Е.И. Пугачёва, 110\n\n"
-        "Ждём вас! Мы пришлём напоминание накануне вечером и за 2 часа до визита.",
-        keyboard=cancel_kb.get_json(),
-    )
-
-    for admin_id in ADMIN_IDS:
-        try:
-            await message.ctx_api.messages.send(
-                user_id=admin_id,
-                random_id=0,
-                message=(
-                    "🔥 Новая онлайн-запись через бота (ВКонтакте)!\n\n"
-                    f"👤 Клиент: id{message.from_id}\n"
-                    f"📱 Телефон: {phone}\n"
-                    f"✂️ Услуги: {', '.join(calc['names'])}\n"
-                    f"📅 Время: {dt.strftime('%d.%m.%Y в %H:%M')}\n"
-                    f"💰 Сумма: {calc['total_price']} ₽"
-                ),
-            )
-        except Exception as e:
-            logger.error("Failed to notify VK admin %s: %s", admin_id, e)
+    # Successfully booked!
+    client_name = f"id{message.from_id}"
+    await _finalize_successful_vk_booking(message.ctx_api, user_id, session_data, client_name, message)
 
 
 @labeler.raw_event(
@@ -480,12 +512,17 @@ async def phone_message_handler(message: Message):
         dt = datetime.datetime.fromtimestamp(pending_ts, tz=SARATOV_TZ)
 
         await message.answer(f"⏳ Номер {phone} сохранён. Связываюсь с Masters для записи на {dt.strftime('%d.%m.%Y в %H:%M')}...")
-        success_init, msg_init, session_data = initiate_booking(phone, current, pending_ts)
+        client_name = f"id{user_id}"
+        success_init, msg_init, session_data = initiate_booking(phone, current, pending_ts, client_name=client_name)
         if not success_init or not session_data:
             await message.answer(
                 f"⚠️ {msg_init}\n\nВы можете завершить бронирование напрямую через сайт:",
                 keyboard=get_booking_keyboard(),
             )
+            return
+
+        if not session_data.get("needs_sms", True):
+            await _finalize_successful_vk_booking(message.ctx_api, user_id, session_data, client_name, message)
             return
 
         user_pending_booking[user_id] = session_data
