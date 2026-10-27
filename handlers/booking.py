@@ -31,10 +31,11 @@ from services.masters import (
     user_selected_day,
     user_selected_services,
 )
-from services.referrals import get_user_phone, is_phone_number, link_user_phone
+from services.referrals import get_user_phone, is_phone_number, link_user_phone, normalize_phone
 
 logger = logging.getLogger(__name__)
 labeler = BotLabeler()
+user_selected_slot: dict[int, int] = {}
 
 
 def get_payload(event: MessageEvent) -> dict[str, Any]:
@@ -145,22 +146,6 @@ async def callback_book_services(event: MessageEvent):
 )
 async def callback_book_days(event: MessageEvent):
     user_id = event.user_id
-    phone = get_user_phone(user_id, platform="vk")
-
-    if not phone:
-        try:
-            await event.edit_message(
-                message=(
-                    "📱 Для онлайн-записи и сохранения бонусов отправьте ваш номер телефона ответным сообщением (например, +79991234567):\n\n"
-                    "Или вы можете записаться напрямую через сайт Masters:"
-                ),
-                keyboard=get_booking_keyboard(),
-            )
-        except Exception as e:
-            logger.warning("Error in callback_book_days: %s", e)
-        await event.send_empty_answer()
-        return
-
     current = user_selected_services.get(user_id, {"hair"})
     schedule = get_schedule(current)
 
@@ -226,12 +211,16 @@ async def callback_book_slot(event: MessageEvent):
     user_id = event.user_id
     payload = get_payload(event)
     timestamp = int(payload.get("ts", 0))
+    user_selected_slot[user_id] = timestamp
 
     phone = get_user_phone(user_id, platform="vk")
     if not phone:
         try:
             await event.edit_message(
-                message="📱 Отправьте ваш номер телефона сообщением (например, +79991234567) для подтверждения записи:",
+                message=(
+                    "📱 Для завершения записи отправьте ваш номер телефона ответным сообщением (например, +79991234567):\n\n"
+                    "Или вы можете записаться напрямую через сайт Masters:"
+                ),
                 keyboard=get_booking_keyboard(),
             )
         except Exception:
@@ -287,6 +276,7 @@ async def callback_book_slot(event: MessageEvent):
 async def callback_book_cancel(event: MessageEvent):
     user_id = event.user_id
     user_pending_booking.pop(user_id, None)
+    user_selected_slot.pop(user_id, None)
     try:
         await event.edit_message(message="Запись отменена.")
     except Exception:
@@ -473,16 +463,44 @@ async def callback_cancel_appointment(event: MessageEvent):
 
 @labeler.message(func=lambda msg: bool(msg.text and is_phone_number(msg.text)))
 async def phone_message_handler(message: Message):
-    if message.from_id in ADMIN_IDS:
+    from handlers.referrals import _has_active_vk_draft
+    if _has_active_vk_draft(message):
         return
-    success, _ = link_user_phone(message.from_id, message.text, platform="vk")
-    if success:
-        user_id = message.from_id
-        user_selected_services[user_id] = {"hair"}
-        await message.answer(
-            "✅ Номер телефона успешно сохранен!\n\n"
-            "Выберите нужные услуги для записи:",
-            keyboard=get_services_keyboard(user_selected_services[user_id]),
-        )
-    else:
+
+    user_id = message.from_id
+    success, _ = link_user_phone(user_id, message.text, platform="vk")
+    if not success:
         await message.answer("Пожалуйста, укажи корректный номер телефона (например, +79991234567).")
+        return
+
+    pending_ts = user_selected_slot.pop(user_id, None)
+    if pending_ts:
+        phone = get_user_phone(user_id, platform="vk") or normalize_phone(message.text)
+        current = user_selected_services.get(user_id, {"hair"})
+        dt = datetime.datetime.fromtimestamp(pending_ts, tz=SARATOV_TZ)
+
+        await message.answer(f"⏳ Номер {phone} сохранён. Связываюсь с Masters для записи на {dt.strftime('%d.%m.%Y в %H:%M')}...")
+        success_init, msg_init, session_data = initiate_booking(phone, current, pending_ts)
+        if not success_init or not session_data:
+            await message.answer(
+                f"⚠️ {msg_init}\n\nВы можете завершить бронирование напрямую через сайт:",
+                keyboard=get_booking_keyboard(),
+            )
+            return
+
+        user_pending_booking[user_id] = session_data
+        await message.answer(
+            f"📩 Подтверждение записи\n\n"
+            f"Вы выбрали: {dt.strftime('%d.%m.%Y в %H:%M')}\n"
+            f"На ваш номер {phone} отправлен проверочный код от Masters.\n\n"
+            "👉 Напишите 4 цифры из СМС в ответном сообщении:",
+            keyboard=get_sms_keyboard(),
+        )
+        return
+
+    user_selected_services[user_id] = {"hair"}
+    await message.answer(
+        "✅ Номер телефона успешно сохранен!\n\n"
+        "Выберите нужные услуги для записи:",
+        keyboard=get_services_keyboard(user_selected_services[user_id]),
+    )
