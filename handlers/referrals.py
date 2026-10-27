@@ -230,14 +230,14 @@ def admin_appt_card_keyboard(appt: dict, current_filter: str, offset: int) -> st
         if not appt.get("client_confirmed"):
             kb.add(Callback("✅ Подтвердить запись", {"cmd": "admin_confirm_appt", "id": appt_id, "filter": current_filter, "offset": offset}))
             kb.row()
-        kb.add(Callback("✏️ Имя", {"cmd": "admin_edit_client", "id": appt_id, "filter": current_filter, "offset": offset}))
+        kb.add(Callback("✏️ Имя / тел.", {"cmd": "admin_edit_client", "id": appt_id, "filter": current_filter, "offset": offset}))
         kb.add(Callback("💰 Цена/услуга", {"cmd": "admin_edit_price", "id": appt_id, "filter": current_filter, "offset": offset}))
         kb.row()
         kb.add(Callback("🗓 Перенести", {"cmd": "admin_resched_start", "id": appt_id, "filter": current_filter, "offset": offset}))
         kb.add(Callback("❌ Отменить", {"cmd": "admin_cancel_appt", "id": appt_id, "filter": current_filter, "offset": offset}))
         kb.row()
     else:
-        kb.add(Callback("✏️ Имя", {"cmd": "admin_edit_client", "id": appt_id, "filter": current_filter, "offset": offset}))
+        kb.add(Callback("✏️ Имя / тел.", {"cmd": "admin_edit_client", "id": appt_id, "filter": current_filter, "offset": offset}))
         kb.add(Callback("💰 Цена/услуга", {"cmd": "admin_edit_price", "id": appt_id, "filter": current_filter, "offset": offset}))
         kb.row()
 
@@ -1045,8 +1045,8 @@ async def admin_create_time_handler(event: MessageEvent):
                 f"⏰ Время: {day_key} {draft['time_str']}\n"
                 f"💰 Цена: {curr_price} ₽\n\n"
                 "👉 Отправьте в чат телефон и имя клиента:\n"
-                "Например: +79173225155 Борис или просто номер 89991234567.\n\n"
-                "Если хотите изменить цену, укажите её в конце сообщения: 89173225155 Борис 1200"
+                "Например: +79991234567 Иван или просто номер 89991234567.\n\n"
+                "Если хотите изменить цену, укажите её в конце сообщения: 89991234567 Иван 1200"
             ),
             keyboard=kb.get_json(),
         )
@@ -1678,11 +1678,12 @@ async def admin_edit_client_handler(event: MessageEvent):
     cur_phone = appt.get("phone") or "—"
 
     text = (
-        f"✏️ Указание имени клиента для записи #{appt_id}\n\n"
+        f"✏️ Изменение данных клиента для записи #{appt_id}\n\n"
         f"Текущее имя: {cur_name}\n"
         f"Текущий телефон: {cur_phone}\n\n"
-        "👉 Отправьте в чат имя (или имя и номер телефона) клиента:\n"
-        "Например: Алексей или Алексей +79271234567"
+        "👉 Отправьте в чат имя и/или номер телефона клиента:\n"
+        "Например: Иван +79271234567 или просто номер +79271234567, или имя Иван\n\n"
+        "Запись мгновенно обновится в базе данных."
     )
     kb = Keyboard(inline=True)
     kb.add(Callback("⬅️ Отмена", {"cmd": "admin_appt_detail", "id": appt_id, "filter": current_filter, "offset": offset}))
@@ -1880,7 +1881,9 @@ async def handle_vk_text_messages(message: Message):
             client_name = "Клиент"
 
         ok, msg = update_appointment_client_details(appt_id, client_name, client_phone)
-        appt = get_appointment(appt_id)
+        appt = get_appointment(appt_id) or {}
+        fresh_name = appt.get("client_name") or client_name
+        fresh_phone = appt.get("phone") or "—"
 
         kb = Keyboard(inline=True)
         kb.add(Callback("📋 К карточке", {"cmd": "admin_appt_detail", "id": appt_id, "filter": current_filter, "offset": offset}))
@@ -1888,7 +1891,7 @@ async def handle_vk_text_messages(message: Message):
         kb.add(Callback("⬅️ К записям", {"cmd": "admin_appts", "filter": current_filter, "offset": offset}))
 
         await message.answer(
-            f"✅ Имя клиента обновлено!\n\n👤 Клиент: {client_name}\n📱 Телефон: {appt.get('phone', '—')}",
+            f"✅ Данные клиента обновлены!\n\n👤 Клиент: {fresh_name}\n📱 Телефон: {fresh_phone}",
             keyboard=kb.get_json(),
         )
         return
@@ -2052,7 +2055,7 @@ async def handle_vk_text_messages(message: Message):
             kb = Keyboard(inline=True)
             kb.add(Callback("⬅️ Отмена", {"cmd": "admin_menu"}))
             await message.answer(
-                f"⏰ Время: {create_draft['time_str']}\n\n👉 Теперь отправьте телефон и имя клиента (например: +79173225155 Борис или с ценой: 89173225155 Борис 1200):",
+                f"⏰ Время: {create_draft['time_str']}\n\n👉 Теперь отправьте телефон и имя клиента (например: +79991234567 Иван или с ценой: 89991234567 Иван 1200):",
                 keyboard=kb.get_json(),
             )
             return
@@ -2073,7 +2076,7 @@ async def handle_vk_text_messages(message: Message):
                     name = token
 
             if not phone:
-                await message.answer("⚠️ Пожалуйста, укажите номер телефона клиента (например: +79173225155 Иван):")
+                await message.answer("⚠️ Пожалуйста, укажите номер телефона клиента (например: +79991234567 Иван):")
                 return
 
             name_parts = [t for t in tokens if not re.sub(r"\D", "", t).isdigit() or len(re.sub(r"\D", "", t)) < 5]

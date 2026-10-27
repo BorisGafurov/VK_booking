@@ -473,6 +473,8 @@ async def callback_cancel_appointment(event: MessageEvent):
 
 @labeler.message(func=lambda msg: bool(msg.text and is_phone_number(msg.text)))
 async def phone_message_handler(message: Message):
+    if message.from_id in ADMIN_IDS:
+        return
     success, _ = link_user_phone(message.from_id, message.text, platform="vk")
     if success:
         user_id = message.from_id

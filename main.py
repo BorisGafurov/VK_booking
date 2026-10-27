@@ -71,10 +71,10 @@ async def main():
 
     # Load handlers in order
     bot.labeler.load(start_labeler)
+    bot.labeler.load(referrals_labeler)
     bot.labeler.load(booking_labeler)
     bot.labeler.load(navigation_labeler)
     bot.labeler.load(advice_labeler)
-    bot.labeler.load(referrals_labeler)
     bot.labeler.load(fallback_labeler)
 
     worker_task = asyncio.create_task(run_reminder_worker(bot.api, "vk"))
