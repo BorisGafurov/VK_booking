@@ -17,6 +17,7 @@ from services.appointments import (
     cancel_appointment,
     complete_appointment,
     confirm_appointment_by_client,
+    confirm_manual_appointment_masters_sms,
     create_manual_appointment,
     get_appointment,
     get_appointments_counts,
@@ -25,6 +26,7 @@ from services.appointments import (
     get_master_appointments,
     get_master_day_schedule,
     get_upcoming_days_schedule,
+    pending_manual_bookings,
     reschedule_appointment,
     set_master_day_schedule,
     update_appointment_price_and_service,
@@ -2171,7 +2173,8 @@ async def handle_vk_text_messages(message: Message):
             time_str = create_draft["time_str"]
             dt_obj = datetime.datetime.strptime(f"{day_key} {time_str}", "%Y-%m-%d %H:%M").replace(tzinfo=SARATOV_TZ)
 
-            ok, res_msg, appt_id = create_manual_appointment(
+            ok, res_msg, appt_id = await asyncio.to_thread(
+                create_manual_appointment,
                 phone=phone,
                 appointment_time=dt_obj,
                 services=create_draft["service"],
@@ -2180,7 +2183,11 @@ async def handle_vk_text_messages(message: Message):
                 platform="manual",
             )
 
-            admin_create_drafts.pop(user_id, None)
+            if ok and appt_id in pending_manual_bookings:
+                create_draft["step"] = "awaiting_masters_sms"
+                create_draft["appt_id"] = appt_id
+            else:
+                admin_create_drafts.pop(user_id, None)
 
             if ok:
                 kb = Keyboard(inline=True)
@@ -2189,14 +2196,34 @@ async def handle_vk_text_messages(message: Message):
                 kb.row()
                 kb.add(Callback("⬅️ Главное меню", {"cmd": "admin_menu"}))
                 await message.answer(
-                    "🎉 Запись успешно создана!\n\n"
+                    f"🎉 {res_msg}\n\n"
                     f"👤 Клиент: {name} ({phone})\n"
                     f"⏰ Дата и время: {format_dt(dt_obj)}\n"
                     f"✂️ Услуга: {create_draft['service']}\n"
-                    f"💰 Стоимость: {custom_price} ₽\n\n"
-                    "✅ Запись внесена в календарь и синхронизирована с Masters CRM!",
+                    f"💰 Стоимость: {custom_price} ₽",
                     keyboard=kb.get_json(),
                 )
             else:
                 await message.answer(f"❌ Ошибка создания записи: {res_msg}")
+            return
+
+        if step == "awaiting_masters_sms":
+            code = raw_text.strip()
+            if not code.isdigit() or len(code) != 4:
+                await message.answer("⚠️ Код из СМС должен содержать 4 цифры. Перешли код, который получил клиент:")
+                return
+
+            appt_id = create_draft.get("appt_id")
+            ok_sms, msg_sms = await asyncio.to_thread(
+                confirm_manual_appointment_masters_sms, appt_id, code
+            )
+            admin_create_drafts.pop(user_id, None)
+            if ok_sms:
+                await message.answer(
+                    f"✅ {msg_sms}",
+                )
+            else:
+                await message.answer(
+                    f"⚠️ {msg_sms}\n\nЗапись остаётся в боте. Код можно запросить у клиента и отправить ещё раз."
+                )
             return

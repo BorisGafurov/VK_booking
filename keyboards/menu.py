@@ -7,8 +7,10 @@ def get_main_menu(is_admin: bool = False) -> str:
     kb.add(Text("✂️ Записаться"), color=KeyboardButtonColor.PRIMARY)
     kb.add(Text("📍 Как добраться"), color=KeyboardButtonColor.SECONDARY)
     kb.row()
-    kb.add(Text("🧴 Советы и товары"), color=KeyboardButtonColor.SECONDARY)
+    kb.add(Text("📋 Мои записи"), color=KeyboardButtonColor.SECONDARY)
     kb.add(Text("🎁 Пригласить друга"), color=KeyboardButtonColor.POSITIVE)
+    kb.row()
+    kb.add(Text("🧴 Советы и товары"), color=KeyboardButtonColor.SECONDARY)
 
     if is_admin:
         kb.row()

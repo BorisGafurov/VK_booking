@@ -17,6 +17,7 @@ from config import ADMIN_IDS, VK_TOKEN
 from database import init_db
 from handlers.advice import labeler as advice_labeler
 from handlers.booking import labeler as booking_labeler
+from handlers.my_appointments import labeler as my_appointments_labeler
 from handlers.navigation import labeler as navigation_labeler
 from handlers.referrals import labeler as referrals_labeler
 from handlers.start import labeler as start_labeler
@@ -73,6 +74,7 @@ async def main():
     bot.labeler.load(start_labeler)
     bot.labeler.load(referrals_labeler)
     bot.labeler.load(booking_labeler)
+    bot.labeler.load(my_appointments_labeler)
     bot.labeler.load(navigation_labeler)
     bot.labeler.load(advice_labeler)
     bot.labeler.load(fallback_labeler)
