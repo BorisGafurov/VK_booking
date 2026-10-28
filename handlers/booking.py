@@ -530,9 +530,9 @@ async def phone_message_handler(message: Message):
         return
 
     user_id = message.from_id
-    success, _ = link_user_phone(user_id, message.text, platform="vk")
+    success, link_msg = link_user_phone(user_id, message.text, platform="vk")
     if not success:
-        await message.answer("Пожалуйста, укажи корректный номер телефона (например, +79991234567).")
+        await message.answer(link_msg or "Пожалуйста, укажи корректный номер телефона (например, +79991234567).")
         return
 
     pending_ts = user_selected_slot.pop(user_id, None)
@@ -569,7 +569,7 @@ async def phone_message_handler(message: Message):
 
     user_selected_services[user_id] = {"hair"}
     await message.answer(
-        "✅ Номер телефона успешно сохранен!\n\n"
+        f"✅ {link_msg}\n\n"
         "Выберите нужные услуги для записи:",
         keyboard=get_services_keyboard(user_selected_services[user_id]),
     )

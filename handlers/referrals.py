@@ -1426,7 +1426,7 @@ async def admin_masters_enter_phone_vk(event: MessageEvent):
             message=(
                 "📱 Введите номер телефона мастера\n\n"
                 "Напишите в ответном сообщении номер, зарегистрированный в сервисе Masters "
-                "(например, +79173225155):"
+                "(например, +79991234567):"
             ),
             keyboard=kb.get_json(),
         )
@@ -1455,7 +1455,7 @@ async def admin_masters_request_code_vk(event: MessageEvent):
         kb.add(Callback("⬅️ Назад", {"cmd": "admin_masters"}))
         try:
             await event.edit_message(
-                message="📱 Введите номер телефона мастера\n\nНапишите номер, зарегистрированный в сервисе Masters (например, +79173225155):",
+                message="📱 Введите номер телефона мастера\n\nНапишите номер, зарегистрированный в сервисе Masters (например, +79991234567):",
                 keyboard=kb.get_json(),
             )
         except Exception:
@@ -1475,7 +1475,7 @@ async def admin_masters_request_code_vk(event: MessageEvent):
                 message=(
                     f"❌ {msg}\n\n"
                     "Проверьте номер или напишите другой номер телефона мастера в ответном сообщении:\n"
-                    "(например, +79173225155)"
+                    "(например, +79991234567)"
                 ),
                 keyboard=kb.get_json(),
             )
@@ -1910,7 +1910,7 @@ async def handle_vk_text_messages(message: Message):
                 kb = Keyboard(inline=True)
                 kb.add(Callback("⬅️ Меню админки", {"cmd": "admin_menu"}))
                 await message.answer(
-                    f"❌ {msg}\n\nПопробуйте ввести номер телефона мастера ещё раз (например, +79173225155):",
+                    f"❌ {msg}\n\nПопробуйте ввести номер телефона мастера ещё раз (например, +79991234567):",
                     keyboard=kb.get_json(),
                 )
                 return
@@ -1930,7 +1930,7 @@ async def handle_vk_text_messages(message: Message):
             kb = Keyboard(inline=True)
             kb.add(Callback("⬅️ Меню админки", {"cmd": "admin_menu"}))
             await message.answer(
-                "⚠️ Пожалуйста, введите корректный номер телефона мастера (например, +79173225155):",
+                "⚠️ Пожалуйста, введите корректный номер телефона мастера (например, +79991234567):",
                 keyboard=kb.get_json(),
             )
             return
