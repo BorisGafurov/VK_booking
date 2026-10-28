@@ -251,6 +251,8 @@ async def _finalize_successful_vk_booking(
     )
 
     cancel_kb = Keyboard(inline=True)
+    cancel_kb.add(Callback("📋 Мои записи", {"cmd": "my_list"}))
+    cancel_kb.row()
     cancel_kb.add(Callback("❌ Отменить запись", {"cmd": "appt_cancel", "id": appt_id}))
 
     text = (
@@ -259,7 +261,9 @@ async def _finalize_successful_vk_booking(
         f"💰 Стоимость: {calc['total_price']} ₽ ({calc['duration_text']})\n"
         f"📅 Дата и время: {dt.strftime('%d.%m.%Y в %H:%M')}\n"
         f"📍 Адрес: Саратов, ул. имени Е.И. Пугачёва, 110\n\n"
-        "Ждём вас! Мы пришлём напоминание накануне вечером и за 2 часа до визита."
+        "Ждём вас! Мы пришлём напоминание накануне вечером и за 2 часа до визита.\n\n"
+        "💡 Все свои записи ты всегда найдёшь в разделе «📋 Мои записи» в меню — "
+        "там можно посмотреть детали, перенести или отменить визит."
     )
 
     if isinstance(target_event_or_msg, MessageEvent):
@@ -438,6 +442,8 @@ async def callback_confirm_appointment(event: MessageEvent):
     kb.add(OpenLink(link="https://yandex.ru/maps/-/CDu~v-7x", label="📍 Как добраться"))
     kb.row()
     kb.add(Callback("❌ Отменить запись", {"cmd": "appt_cancel", "id": int(appt_id)}))
+    kb.row()
+    kb.add(Callback("📋 Мои записи", {"cmd": "my_list"}))
 
     try:
         await event.edit_message(
@@ -491,12 +497,19 @@ async def callback_cancel_appointment(event: MessageEvent):
         await safe_event_answer(event, msg)
         return
 
+    nav_kb = Keyboard(inline=True)
+    nav_kb.add(Callback("📋 Мои записи", {"cmd": "my_list"}))
+    nav_kb.row()
+    nav_kb.add(Callback("✂️ Записаться", {"cmd": "book_services"}))
+
     try:
         await event.edit_message(
             message=(
                 "❌ Запись успешно отменена\n\n"
-                "Будем рады видеть в другой раз! Чтобы выбрать новую дату, нажми «✂️ Записаться»."
-            )
+                "Будем рады видеть в другой раз! Чтобы выбрать новую дату, нажми «✂️ Записаться».\n\n"
+                "💡 Остальные твои записи — в разделе «📋 Мои записи»."
+            ),
+            keyboard=nav_kb.get_json(),
         )
     except Exception as e:
         logger.warning("Error editing cancelled appt msg: %s", e)
