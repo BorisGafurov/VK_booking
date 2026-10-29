@@ -14,6 +14,7 @@ from keyboards.advice import (
     get_recommendations_hub_keyboard,
 )
 from services.recommendations import get_article, get_product, get_products
+from handlers.ui import edit_or_send as _edit_or_send
 
 logger = logging.getLogger(__name__)
 labeler = BotLabeler()
@@ -99,7 +100,7 @@ async def products_menu_message(message: Message):
 )
 async def callback_rec_hub(event: MessageEvent):
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message=HUB_TEXT,
             keyboard=get_recommendations_hub_keyboard(),
         )
@@ -122,7 +123,7 @@ async def callback_rec_products(event: MessageEvent):
     text = f"{PRODUCTS_TEXT}\n\n📄 Страница {page + 1} из {total_pages}"
 
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message=text,
             keyboard=get_products_keyboard(page=page),
         )
@@ -148,7 +149,7 @@ async def callback_article_detail(event: MessageEvent):
     text = f"📖 {article['title']}\n\n{article['text']}"
 
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message=text,
             keyboard=get_article_detail_keyboard(slug),
         )
@@ -176,7 +177,7 @@ async def callback_product_detail(event: MessageEvent):
     text = f"🏺 {product['title']}\n\n{product['text']}"
 
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message=text,
             keyboard=get_product_detail_keyboard(product["links"], page=page),
         )

@@ -56,6 +56,7 @@ from services.masters import (
     user_selected_services,
 )
 from services.referrals import get_user_phone, is_phone_number, link_user_phone, normalize_phone
+from handlers.ui import edit_or_send as _edit_or_send
 
 logger = logging.getLogger(__name__)
 labeler = BotLabeler()
@@ -132,7 +133,7 @@ async def callback_book_toggle(event: MessageEvent):
     user_selected_services[user_id] = current
 
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message=_format_services_text(current),
             keyboard=get_services_keyboard(current),
         )
@@ -154,7 +155,7 @@ async def callback_book_services(event: MessageEvent):
     user_id = event.user_id
     current = user_selected_services.get(user_id, {"hair"})
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message=_format_services_text(current),
             keyboard=get_services_keyboard(current),
         )
@@ -175,7 +176,7 @@ async def callback_book_days(event: MessageEvent):
 
     if not schedule:
         try:
-            await event.edit_message(
+            await _edit_or_send(event, 
                 message="⚠️ Не удалось загрузить расписание онлайн. Выберите удобное время на сайте:",
                 keyboard=get_booking_keyboard(),
             )
@@ -186,7 +187,7 @@ async def callback_book_days(event: MessageEvent):
 
     calc = calculate_services(current)
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message=(
                 f"📅 Выберите удобный день записи:\n\n"
                 f"Услуги: {', '.join(calc['names'])}\n"
@@ -217,7 +218,7 @@ async def callback_book_day(event: MessageEvent):
 
     title = day_data["title"] if day_data else day_key
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message=f"🕒 Свободные окна на {title}:\n\nВыберите время начала:",
             keyboard=get_slots_keyboard(slots),
         )
@@ -267,13 +268,11 @@ async def _finalize_successful_vk_booking(
     )
 
     if isinstance(target_event_or_msg, MessageEvent):
-        try:
-            await target_event_or_msg.edit_message(
-                message=text,
-                keyboard=cancel_kb.get_json(),
-            )
-        except Exception as e:
-            logger.warning("Error editing confirmed appt msg: %s", e)
+        await _edit_or_send(
+            target_event_or_msg,
+            message=text,
+            keyboard=cancel_kb.get_json(),
+        )
         await target_event_or_msg.send_empty_answer()
     else:
         await target_event_or_msg.answer(
@@ -313,7 +312,7 @@ async def callback_book_slot(event: MessageEvent):
     phone = get_user_phone(user_id, platform="vk")
     if not phone:
         try:
-            await event.edit_message(
+            await _edit_or_send(event, 
                 message=(
                     "📱 Для завершения записи отправьте ваш номер телефона ответным сообщением (например, +79991234567):\n\n"
                     "Или вы можете записаться напрямую через сайт Masters:"
@@ -326,7 +325,7 @@ async def callback_book_slot(event: MessageEvent):
         return
 
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message="⏳ Связываюсь с Masters...",
             keyboard=get_sms_keyboard(),
         )
@@ -341,7 +340,7 @@ async def callback_book_slot(event: MessageEvent):
 
     if not success or not session_data:
         try:
-            await event.edit_message(
+            await _edit_or_send(event, 
                 message=f"⚠️ {msg}\n\nВы можете завершить бронирование напрямую через сайт:",
                 keyboard=get_booking_keyboard(),
             )
@@ -358,7 +357,7 @@ async def callback_book_slot(event: MessageEvent):
     dt = datetime.datetime.fromtimestamp(timestamp, tz=SARATOV_TZ)
 
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message=(
                 f"📩 Подтверждение записи\n\n"
                 f"Вы выбрали: {dt.strftime('%d.%m.%Y в %H:%M')}\n"
@@ -382,7 +381,7 @@ async def callback_book_cancel(event: MessageEvent):
     user_pending_booking.pop(user_id, None)
     user_selected_slot.pop(user_id, None)
     try:
-        await event.edit_message(message="Запись отменена.")
+        await _edit_or_send(event, message="Запись отменена.")
     except Exception:
         pass
     await event.show_snackbar("Запись отменена.")
@@ -446,7 +445,7 @@ async def callback_confirm_appointment(event: MessageEvent):
     kb.add(Callback("📋 Мои записи", {"cmd": "my_list"}))
 
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message=(
                 "✅ Запись подтверждена!\n\n"
                 f"Спасибо за подтверждение! Ждём вас {dt_str} ✂️\n"
@@ -503,7 +502,7 @@ async def callback_cancel_appointment(event: MessageEvent):
     nav_kb.add(Callback("✂️ Записаться", {"cmd": "book_services"}))
 
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message=(
                 "❌ Запись успешно отменена\n\n"
                 "Будем рады видеть в другой раз! Чтобы выбрать новую дату, нажми «✂️ Записаться».\n\n"

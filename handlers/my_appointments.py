@@ -16,6 +16,7 @@ from services.appointments import (
     reschedule_appointment,
 )
 from services.masters import get_schedule
+from handlers.ui import edit_or_send as _edit_or_send
 
 logger = logging.getLogger(__name__)
 labeler = BotLabeler()
@@ -96,7 +97,7 @@ async def my_appointments_cb(event: MessageEvent):
         text = "📋 Твои записи:\n\n" + "\n\n".join(blocks)
 
     try:
-        await event.edit_message(message=text, keyboard=_my_appts_keyboard(appts))
+        await _edit_or_send(event, message=text, keyboard=_my_appts_keyboard(appts))
     except Exception:
         pass
     await event.send_empty_answer()
@@ -123,7 +124,7 @@ async def my_resched_start(event: MessageEvent):
     kb.add(Callback("◀️ Мои записи", {"cmd": "my_list"}))
 
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message="🗓 Перенос записи\n\nВыбери новый день:",
             keyboard=kb.get_json(),
         )
@@ -154,7 +155,7 @@ async def my_resched_day(event: MessageEvent):
     kb.add(Callback("◀️ Другой день", {"cmd": "my_resched", "id": user_resched_appt.get(event.user_id, 0)}))
 
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message=f"🕒 Свободные окна на {title}:\n\nВыбери новое время:",
             keyboard=kb.get_json(),
         )
@@ -187,7 +188,7 @@ async def my_resched_slot(event: MessageEvent):
 
     if not ok:
         try:
-            await event.edit_message(message=f"⚠️ {msg}")
+            await _edit_or_send(event, message=f"⚠️ {msg}")
         except Exception:
             pass
         await event.send_empty_answer()
@@ -201,7 +202,7 @@ async def my_resched_slot(event: MessageEvent):
         "Напомним накануне вечером и за 2 часа до визита."
     )
     try:
-        await event.edit_message(message=text, keyboard=_my_appts_keyboard([appt]))
+        await _edit_or_send(event, message=text, keyboard=_my_appts_keyboard([appt]))
     except Exception:
         pass
     await event.send_empty_answer()

@@ -63,6 +63,7 @@ from services.referrals import (
     normalize_phone,
     save_user,
 )
+from handlers.ui import edit_or_send as _edit_or_send
 
 logger = logging.getLogger(__name__)
 labeler = BotLabeler()
@@ -439,7 +440,7 @@ async def admin_menu_handler(event: MessageEvent):
         return
 
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message="⚙️ Панель мастера и администратора:",
             keyboard=admin_menu_keyboard(),
         )
@@ -481,7 +482,7 @@ async def admin_appts_handler(event: MessageEvent):
         text += "Нажмите на запись для просмотра деталей, подтверждения, завершения визита или переноса:"
 
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message=text,
             keyboard=admin_appts_keyboard(appts, current_filter, offset, total, counts),
         )
@@ -542,7 +543,7 @@ async def admin_appt_detail_handler(event: MessageEvent):
     )
 
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message=card_text,
             keyboard=admin_appt_card_keyboard(appt, current_filter, offset),
         )
@@ -594,7 +595,7 @@ async def admin_complete_appt_handler(event: MessageEvent):
     updated_appt = get_appointment(appt_id)
     if updated_appt:
         try:
-            await event.edit_message(
+            await _edit_or_send(event, 
                 message=f"✅ {msg}\n\n" + f"📋 Карточка записи #{appt_id}\nСтатус: ✂️ Завершена (клиент пострижен)",
                 keyboard=admin_appt_card_keyboard(updated_appt, current_filter, offset),
             )
@@ -649,7 +650,7 @@ async def admin_cancel_appt_handler(event: MessageEvent):
     # Redirect to list
     appts, total = get_master_appointments(date_filter=current_filter, limit=PAGE_SIZE, offset=offset)
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message=f"❌ Запись #{appt_id} отменена.\n\n📋 Календарь записей ({total} всего):",
             keyboard=admin_appts_keyboard(appts, current_filter, offset, total),
         )
@@ -689,7 +690,7 @@ async def admin_resched_start_handler(event: MessageEvent):
     kb.add(Callback("⬅️ Назад к карточке", {"cmd": "admin_appt", "id": appt_id, "filter": current_filter, "offset": offset}))
 
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message=f"🗓 Перенос записи #{appt_id}\n\nВыберите новую дату:",
             keyboard=kb.get_json(),
         )
@@ -729,7 +730,7 @@ async def admin_resched_day_handler(event: MessageEvent):
     kb.add(Callback("⬅️ Назад к датам", {"cmd": "admin_resched_start", "id": appt_id, "filter": current_filter, "offset": offset}))
 
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message=f"🗓 Перенос записи #{appt_id} на {day_key}\n\nВыберите время или введите своё:",
             keyboard=kb.get_json(),
         )
@@ -805,7 +806,7 @@ async def admin_resched_custom_handler(event: MessageEvent):
     kb.add(Callback("⬅️ Отмена", {"cmd": "admin_appt", "id": appt_id, "filter": "today", "offset": 0}))
 
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message=f"✏️ Введите желаемое время на {day_key}\n\nНапишите время в ответном сообщении (например 08:30 или 21:15):",
             keyboard=kb.get_json(),
         )
@@ -838,7 +839,7 @@ async def admin_create_start_handler(event: MessageEvent):
     kb.add(Callback("⬅️ Отмена", {"cmd": "admin_menu"}))
 
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message="➕ Создание новой записи мастером\n\nШаг 1 из 4: Выберите услугу из Masters или введите другое название:",
             keyboard=kb.get_json(),
         )
@@ -880,7 +881,7 @@ async def admin_create_svc_handler(event: MessageEvent):
     kb.add(Callback("⬅️ Отмена", {"cmd": "admin_menu"}))
 
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message="➕ Шаг 2 из 4: Выберите дату записи:",
             keyboard=kb.get_json(),
         )
@@ -907,7 +908,7 @@ async def admin_create_svc_custom_handler(event: MessageEvent):
     kb.add(Callback("⬅️ Отмена", {"cmd": "admin_create_start"}))
 
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message="✏️ Введите название услуги в чат (например: Моделирование бороды VIP):",
             keyboard=kb.get_json(),
         )
@@ -972,7 +973,7 @@ async def admin_create_day_handler(event: MessageEvent):
     kb.add(Callback("⬅️ Назад к датам", {"cmd": "admin_create_start"}))
 
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message=msg_text,
             keyboard=kb.get_json(),
         )
@@ -1012,7 +1013,7 @@ async def admin_create_busy_handler(event: MessageEvent):
     kb.add(Callback("⬅️ Выбрать другое время", {"cmd": "admin_create_day", "day": day_key}))
 
     try:
-        await event.edit_message(message=text, keyboard=kb.get_json())
+        await _edit_or_send(event, message=text, keyboard=kb.get_json())
     except Exception:
         pass
     await safe_event_answer(event)
@@ -1041,7 +1042,7 @@ async def admin_create_time_handler(event: MessageEvent):
     kb.add(Callback("⬅️ Отмена", {"cmd": "admin_menu"}))
 
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message=(
                 f"➕ Шаг 4 из 4: Данные клиента и цена\n\n"
                 f"✂️ Услуга: {curr_svc}\n"
@@ -1076,7 +1077,7 @@ async def admin_create_time_custom_handler(event: MessageEvent):
     kb.add(Callback("⬅️ Отмена", {"cmd": "admin_create_start"}))
 
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message=f"✏️ Введите любое время записи на {draft.get('day_key')}\n\nНапишите в ответном сообщении (например 08:30 или 22:00):",
             keyboard=kb.get_json(),
         )
@@ -1107,7 +1108,7 @@ async def admin_sched_handler(event: MessageEvent):
         "Выберите день, чтобы сделать его выходным/рабочим или изменить часы работы (прибавить/убавить начало и конец дня):"
     )
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message=text,
             keyboard=admin_schedule_keyboard(slice_days, offset, len(all_days)),
         )
@@ -1140,7 +1141,7 @@ async def admin_sched_day_handler(event: MessageEvent):
     )
 
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message=card_text,
             keyboard=admin_sched_day_keyboard(sched),
         )
@@ -1218,7 +1219,7 @@ async def admin_pending_handler(event: MessageEvent):
     )
 
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message=text,
             keyboard=pending_referrals_keyboard(referrals_list, offset, total),
         )
@@ -1250,7 +1251,7 @@ async def admin_rewards_handler(event: MessageEvent):
     )
 
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message=text,
             keyboard=active_rewards_keyboard(rewards_list, offset, total),
         )
@@ -1297,7 +1298,7 @@ async def confirm_visit(event: MessageEvent):
     msg_text = f"ℹ️ {text}\n\n⏳ Ожидают подтверждения:"
 
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message=msg_text,
             keyboard=pending_referrals_keyboard(referrals_list, offset, total),
         )
@@ -1341,7 +1342,7 @@ async def use_reward(event: MessageEvent):
     msg_text = f"ℹ️ {text}\n\n💰 Активные бонусы клиентов:"
 
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message=msg_text,
             keyboard=active_rewards_keyboard(rewards_list, offset, total),
         )
@@ -1402,7 +1403,7 @@ async def admin_masters_status_vk(event: MessageEvent):
         kb.add(Callback("⬅️ Меню админки", {"cmd": "admin_menu"}))
 
     try:
-        await event.edit_message(message=text, keyboard=kb.get_json())
+        await _edit_or_send(event, message=text, keyboard=kb.get_json())
     except Exception:
         pass
 
@@ -1424,7 +1425,7 @@ async def admin_masters_enter_phone_vk(event: MessageEvent):
     kb = Keyboard(inline=True)
     kb.add(Callback("⬅️ Назад", {"cmd": "admin_masters"}))
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message=(
                 "📱 Введите номер телефона мастера\n\n"
                 "Напишите в ответном сообщении номер, зарегистрированный в сервисе Masters "
@@ -1456,7 +1457,7 @@ async def admin_masters_request_code_vk(event: MessageEvent):
         kb = Keyboard(inline=True)
         kb.add(Callback("⬅️ Назад", {"cmd": "admin_masters"}))
         try:
-            await event.edit_message(
+            await _edit_or_send(event, 
                 message="📱 Введите номер телефона мастера\n\nНапишите номер, зарегистрированный в сервисе Masters (например, +79991234567):",
                 keyboard=kb.get_json(),
             )
@@ -1473,7 +1474,7 @@ async def admin_masters_request_code_vk(event: MessageEvent):
         kb.row()
         kb.add(Callback("⬅️ Назад", {"cmd": "admin_masters"}))
         try:
-            await event.edit_message(
+            await _edit_or_send(event, 
                 message=(
                     f"❌ {msg}\n\n"
                     "Проверьте номер или напишите другой номер телефона мастера в ответном сообщении:\n"
@@ -1492,7 +1493,7 @@ async def admin_masters_request_code_vk(event: MessageEvent):
     kb.row()
     kb.add(Callback("⬅️ Отмена", {"cmd": "admin_masters"}))
     try:
-        await event.edit_message(
+        await _edit_or_send(event, 
             message=f"📩 Код подтверждения отправлен\n\nНа номер {session_data['phone_formatted']} отправлено СМС от Masters.\n\n👉 Напишите 4 цифры из СМС в ответном сообщении:",
             keyboard=kb.get_json(),
         )
@@ -1553,7 +1554,7 @@ async def admin_broadcast_start(event: MessageEvent):
         "После отправки бот покажет предпросмотр и попросит подтвердить рассылку перед отправкой."
     )
     try:
-        await event.edit_message(message=text, keyboard=kb.get_json())
+        await _edit_or_send(event, message=text, keyboard=kb.get_json())
     except Exception:
         pass
 
@@ -1595,7 +1596,7 @@ async def admin_broadcast_send(event: MessageEvent):
 
     await safe_event_answer(event)
     try:
-        await event.edit_message(message=f"⏳ Отправка рассылки...\n0 из {total}")
+        await _edit_or_send(event, message=f"⏳ Отправка рассылки...\n0 из {total}")
     except Exception:
         pass
 
@@ -1624,7 +1625,7 @@ async def admin_broadcast_send(event: MessageEvent):
     kb.add(Callback("⬅️ Меню админки", {"cmd": "admin_menu"}))
 
     try:
-        await event.edit_message(message=report, keyboard=kb.get_json())
+        await _edit_or_send(event, message=report, keyboard=kb.get_json())
     except Exception:
         pass
 
@@ -1652,7 +1653,7 @@ async def admin_clients_handler(event: MessageEvent):
             "Алексей 89053214455"
         )
         try:
-            await event.edit_message(message=msg, keyboard=kb.get_json())
+            await _edit_or_send(event, message=msg, keyboard=kb.get_json())
         except Exception:
             pass
         await safe_event_answer(event)
@@ -1663,7 +1664,7 @@ async def admin_clients_handler(event: MessageEvent):
         kb = Keyboard(inline=True)
         kb.add(Callback("⬅️ Назад", {"cmd": "admin_clients", "offset": 0}))
         try:
-            await event.edit_message(message="🔍 Поиск клиента в базе\n\nОтправьте в чат имя или телефон клиента:", keyboard=kb.get_json())
+            await _edit_or_send(event, message="🔍 Поиск клиента в базе\n\nОтправьте в чат имя или телефон клиента:", keyboard=kb.get_json())
         except Exception:
             pass
         await safe_event_answer(event)
@@ -1696,7 +1697,7 @@ async def admin_clients_handler(event: MessageEvent):
     kb.add(Callback("⬅️ Меню админки", {"cmd": "admin_menu"}))
 
     try:
-        await event.edit_message(message=text, keyboard=kb.get_json())
+        await _edit_or_send(event, message=text, keyboard=kb.get_json())
     except Exception:
         pass
     await safe_event_answer(event)
@@ -1743,7 +1744,7 @@ async def admin_edit_client_handler(event: MessageEvent):
     kb.add(Callback("⬅️ Отмена", {"cmd": "admin_appt_detail", "id": appt_id, "filter": current_filter, "offset": offset}))
 
     try:
-        await event.edit_message(message=text, keyboard=kb.get_json())
+        await _edit_or_send(event, message=text, keyboard=kb.get_json())
     except Exception:
         pass
     await safe_event_answer(event)
@@ -1793,7 +1794,7 @@ async def admin_edit_price_handler(event: MessageEvent):
     kb.add(Callback("⬅️ Назад к карточке", {"cmd": "admin_appt_detail", "id": appt_id, "filter": current_filter, "offset": offset}))
 
     try:
-        await event.edit_message(message=text, keyboard=kb.get_json())
+        await _edit_or_send(event, message=text, keyboard=kb.get_json())
     except Exception:
         pass
     await safe_event_answer(event)
@@ -1855,7 +1856,7 @@ async def admin_set_custom_price_handler(event: MessageEvent):
     kb.add(Callback("⬅️ Отмена", {"cmd": "admin_edit_price", "id": appt_id, "filter": current_filter, "offset": offset}))
 
     try:
-        await event.edit_message(message=text, keyboard=kb.get_json())
+        await _edit_or_send(event, message=text, keyboard=kb.get_json())
     except Exception:
         pass
     await safe_event_answer(event)
