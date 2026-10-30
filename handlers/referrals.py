@@ -7,7 +7,7 @@ import re
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from vkbottle import Callback, GroupEventType, Keyboard
+from vkbottle import Callback, GroupEventType, Keyboard, OpenLink
 from vkbottle.bot import BotLabeler, Message, MessageEvent
 
 from config import ADMIN_IDS, REFERRAL_REWARD_TEXT
@@ -17,7 +17,6 @@ from services.appointments import (
     cancel_appointment,
     complete_appointment,
     confirm_appointment_by_client,
-    confirm_manual_appointment_masters_sms,
     create_manual_appointment,
     get_appointment,
     get_appointments_counts,
@@ -26,7 +25,6 @@ from services.appointments import (
     get_master_appointments,
     get_master_day_schedule,
     get_upcoming_days_schedule,
-    pending_manual_bookings,
     reschedule_appointment,
     set_master_day_schedule,
     update_appointment_price_and_service,
@@ -38,16 +36,7 @@ from services.client_import import (
     import_clients_from_text,
     update_appointment_client_details,
 )
-from services.masters import get_service_options_for_creation
-from services.masters_sync import (
-    confirm_master_login,
-    disconnect_masters_session,
-    get_active_masters_session,
-    get_suggested_master_phone,
-    pending_master_logins,
-    request_master_login,
-    sync_masters_appointments,
-)
+from services.booking import get_service_options_for_creation
 from services.referrals import (
     build_referral_link,
     get_active_rewards,
@@ -143,7 +132,7 @@ def admin_menu_keyboard() -> str:
     kb.add(Callback("⏳ Ожидающие", {"cmd": "admin_pending", "offset": 0}))
     kb.row()
     kb.add(Callback("💰 Бонусы", {"cmd": "admin_rewards", "offset": 0}))
-    kb.add(Callback("🔄 Masters", {"cmd": "admin_masters"}))
+    kb.add(Callback("🌐 База «Срез»", {"cmd": "admin_sync"}))
     kb.row()
     kb.add(Callback("📢 Рассылка", {"cmd": "admin_broadcast"}))
     return kb.get_json()
@@ -528,7 +517,6 @@ async def admin_appt_detail_handler(event: MessageEvent):
     price = appt.get("total_price") or 0
     time_fmt = format_dt(appt["appointment_time"])
     platform = (appt.get("platform") or "vk").upper()
-    masters_id = appt.get("masters_id") or "—"
 
     card_text = (
         f"📋 Карточка записи #{appt['id']}\n\n"
@@ -538,8 +526,7 @@ async def admin_appt_detail_handler(event: MessageEvent):
         f"💰 Стоимость: {price} ₽\n"
         f"⏰ Дата и время: {time_fmt}\n"
         f"📌 Статус: {st_text}\n"
-        f"🌐 Источник: {platform}\n"
-        f"🔄 Masters ID: {masters_id}"
+        f"🌐 Источник: {platform}"
     )
 
     try:
@@ -840,7 +827,7 @@ async def admin_create_start_handler(event: MessageEvent):
 
     try:
         await _edit_or_send(event, 
-            message="➕ Создание новой записи мастером\n\nШаг 1 из 4: Выберите услугу из Masters или введите другое название:",
+            message="➕ Создание новой записи мастером\n\nШаг 1 из 4: Выберите услугу или введите другое название:",
             keyboard=kb.get_json(),
         )
     except Exception:
@@ -942,7 +929,7 @@ async def admin_create_day_handler(event: MessageEvent):
     if free_slots:
         lines.append(f"🟢 Свободно: {', '.join(free_slots)}")
     else:
-        lines.append("⚠️ На этот день нет свободных окон в Masters")
+        lines.append("⚠️ На этот день нет свободных окон")
 
     if busy_appts:
         lines.append("\n🔴 Уже занято:")
@@ -1000,7 +987,7 @@ async def admin_create_busy_handler(event: MessageEvent):
 
     slots_info = await asyncio.to_thread(get_day_time_slots_status, day_key)
     b_appt = next((b for b in slots_info.get("busy_appts", []) if b["time"] == time_val), None)
-    details = f"{b_appt['client_name']} ({b_appt['services']})" if b_appt else "запись из Masters"
+    details = f"{b_appt['client_name']} ({b_appt['services']})" if b_appt else "занятый слот"
 
     text = (
         f"⚠️ Внимание: на {day_key} в {time_val} уже есть запись!\n\n"
@@ -1361,46 +1348,29 @@ async def noop(event: MessageEvent):
     await safe_event_answer(event)
 
 
-# Masters integration
+# Shared schedule status
 @labeler.raw_event(
     GroupEventType.MESSAGE_EVENT,
     dataclass=MessageEvent,
-    func=lambda event: get_payload(event).get("cmd") == "admin_masters",
+    func=lambda event: get_payload(event).get("cmd") == "admin_sync",
 )
-async def admin_masters_status_vk(event: MessageEvent):
+async def admin_sync_status_vk(event: MessageEvent):
     if not is_admin(event.user_id):
         await event.show_snackbar("Нет доступа.")
         return
 
-    session = get_active_masters_session()
+    text = (
+        "🌐 Единая база «Срез»\n\n"
+        "Все 3 бота (Telegram, VK, MAX) и сайт srezforma.ru работают через общую базу данных в режиме реального времени.\n\n"
+        "• Любая запись через бота или сайт мгновенно бронирует время во всей системе.\n"
+        "• При отмене записи слот сразу же освобождается везде.\n"
+        "• Расписание, услуги и занятость — единые для ботов и сайта.\n\n"
+        "Вы можете управлять записями прямо в боте или в веб-CRM:"
+    )
     kb = Keyboard(inline=True)
-    if session:
-        text = (
-            "✅ Синхронизация Masters подключена\n\n"
-            f"📱 Номер мастера: {session['master_phone']}\n"
-            "Записи из Masters автоматически синхронизируются каждые 10 минут, "
-            "а клиенты получают напоминания о стрижке накануне вечером и за 2 часа.\n\n"
-            "Вы можете запустить принудительную синхронизацию прямо сейчас:"
-        )
-        kb.add(Callback("🔄 Синхронизировать сейчас", {"cmd": "admin_masters_sync"}))
-        kb.row()
-        kb.add(Callback("🚪 Отключить аккаунт Masters", {"cmd": "admin_masters_logout"}))
-        kb.row()
-        kb.add(Callback("⬅️ Меню админки", {"cmd": "admin_menu"}))
-    else:
-        suggested_phone = get_suggested_master_phone()
-        text = (
-            "🔗 Подключение аккаунта Masters\n\n"
-            "Бот может автоматически забирать все записи из твоего личного кабинета Masters "
-            "и бесплатно рассылать клиентам напоминания о визите накануне вечером и за 2 часа.\n\n"
-            f"📱 Номер мастера для входа: {suggested_phone}\n\n"
-            "Нажми кнопку ниже, чтобы отправить проверочный код по СМС, или укажи другой номер:"
-        )
-        kb.add(Callback(f"📲 СМС на {suggested_phone}", {"cmd": "admin_masters_request", "phone": suggested_phone}))
-        kb.row()
-        kb.add(Callback("✏️ Ввести другой номер", {"cmd": "admin_masters_enter_phone"}))
-        kb.row()
-        kb.add(Callback("⬅️ Меню админки", {"cmd": "admin_menu"}))
+    kb.add(OpenLink(link="https://srezforma.ru?view=crm", label="🌐 CRM «Срез»"))
+    kb.row()
+    kb.add(Callback("⬅️ Меню админки", {"cmd": "admin_menu"}))
 
     try:
         await _edit_or_send(event, message=text, keyboard=kb.get_json())
@@ -1408,128 +1378,6 @@ async def admin_masters_status_vk(event: MessageEvent):
         pass
 
     await safe_event_answer(event)
-
-
-@labeler.raw_event(
-    GroupEventType.MESSAGE_EVENT,
-    dataclass=MessageEvent,
-    func=lambda event: get_payload(event).get("cmd") == "admin_masters_enter_phone",
-)
-async def admin_masters_enter_phone_vk(event: MessageEvent):
-    if not is_admin(event.user_id):
-        await event.show_snackbar("Нет доступа.")
-        return
-
-    user_id = event.user_id
-    pending_master_logins[user_id] = {"awaiting_phone": True}
-    kb = Keyboard(inline=True)
-    kb.add(Callback("⬅️ Назад", {"cmd": "admin_masters"}))
-    try:
-        await _edit_or_send(event, 
-            message=(
-                "📱 Введите номер телефона мастера\n\n"
-                "Напишите в ответном сообщении номер, зарегистрированный в сервисе Masters "
-                "(например, +79991234567):"
-            ),
-            keyboard=kb.get_json(),
-        )
-    except Exception:
-        pass
-    await safe_event_answer(event)
-
-
-@labeler.raw_event(
-    GroupEventType.MESSAGE_EVENT,
-    dataclass=MessageEvent,
-    func=lambda event: get_payload(event).get("cmd") == "admin_masters_request",
-)
-async def admin_masters_request_code_vk(event: MessageEvent):
-    if not is_admin(event.user_id):
-        await event.show_snackbar("Нет доступа.")
-        return
-
-    user_id = event.user_id
-    payload = get_payload(event)
-    phone = payload.get("phone") or get_suggested_master_phone()
-
-    if not phone:
-        pending_master_logins[user_id] = {"awaiting_phone": True}
-        kb = Keyboard(inline=True)
-        kb.add(Callback("⬅️ Назад", {"cmd": "admin_masters"}))
-        try:
-            await _edit_or_send(event, 
-                message="📱 Введите номер телефона мастера\n\nНапишите номер, зарегистрированный в сервисе Masters (например, +79991234567):",
-                keyboard=kb.get_json(),
-            )
-        except Exception:
-            pass
-        await safe_event_answer(event)
-        return
-
-    success, msg, session_data = request_master_login(phone)
-    if not success:
-        pending_master_logins[user_id] = {"awaiting_phone": True}
-        kb = Keyboard(inline=True)
-        kb.add(Callback("✏️ Ввести номер вручную", {"cmd": "admin_masters_enter_phone"}))
-        kb.row()
-        kb.add(Callback("⬅️ Назад", {"cmd": "admin_masters"}))
-        try:
-            await _edit_or_send(event, 
-                message=(
-                    f"❌ {msg}\n\n"
-                    "Проверьте номер или напишите другой номер телефона мастера в ответном сообщении:\n"
-                    "(например, +79991234567)"
-                ),
-                keyboard=kb.get_json(),
-            )
-        except Exception:
-            pass
-        await safe_event_answer(event)
-        return
-
-    pending_master_logins[user_id] = session_data
-    kb = Keyboard(inline=True)
-    kb.add(Callback("✏️ Ввести другой номер", {"cmd": "admin_masters_enter_phone"}))
-    kb.row()
-    kb.add(Callback("⬅️ Отмена", {"cmd": "admin_masters"}))
-    try:
-        await _edit_or_send(event, 
-            message=f"📩 Код подтверждения отправлен\n\nНа номер {session_data['phone_formatted']} отправлено СМС от Masters.\n\n👉 Напишите 4 цифры из СМС в ответном сообщении:",
-            keyboard=kb.get_json(),
-        )
-    except Exception:
-        pass
-
-    await safe_event_answer(event)
-
-
-@labeler.raw_event(
-    GroupEventType.MESSAGE_EVENT,
-    dataclass=MessageEvent,
-    func=lambda event: get_payload(event).get("cmd") == "admin_masters_sync",
-)
-async def admin_masters_sync_now_vk(event: MessageEvent):
-    if not is_admin(event.user_id):
-        await event.show_snackbar("Нет доступа.")
-        return
-
-    ok, count, msg = sync_masters_appointments()
-    await safe_event_answer(event, snackbar=msg)
-
-
-@labeler.raw_event(
-    GroupEventType.MESSAGE_EVENT,
-    dataclass=MessageEvent,
-    func=lambda event: get_payload(event).get("cmd") == "admin_masters_logout",
-)
-async def admin_masters_disconnect_vk(event: MessageEvent):
-    if not is_admin(event.user_id):
-        await event.show_snackbar("Нет доступа.")
-        return
-
-    disconnect_masters_session()
-    await safe_event_answer(event, snackbar="Синхронизация отключена")
-    await admin_masters_status_vk(event)
 
 
 # Broadcast flow
@@ -1647,7 +1495,7 @@ async def admin_clients_handler(event: MessageEvent):
         kb = Keyboard(inline=True)
         kb.add(Callback("⬅️ Назад", {"cmd": "admin_clients", "offset": 0}))
         msg = (
-            "📥 Импорт базы клиентов из Masters\n\n"
+            "📥 Импорт базы клиентов\n\n"
             "Отправьте список клиентов сообщением в чат:\n"
             "Иван Иванов +79271234567\n"
             "Алексей 89053214455"
@@ -1691,7 +1539,7 @@ async def admin_clients_handler(event: MessageEvent):
     if offset > 0 or offset + 4 < total:
         kb.row()
 
-    kb.add(Callback("📥 Импорт из Masters", {"cmd": "admin_clients", "action": "import"}))
+    kb.add(Callback("📥 Импорт клиентов", {"cmd": "admin_clients", "action": "import"}))
     kb.add(Callback("🔍 Поиск", {"cmd": "admin_clients", "action": "search"}))
     kb.row()
     kb.add(Callback("⬅️ Меню админки", {"cmd": "admin_menu"}))
@@ -1865,8 +1713,7 @@ async def admin_set_custom_price_handler(event: MessageEvent):
 def _has_active_vk_draft(message: Message) -> bool:
     uid = message.from_id
     return (
-        uid in pending_master_logins
-        or uid in admin_broadcast_drafts
+        uid in admin_broadcast_drafts
         or uid in admin_resched_drafts
         or uid in admin_create_drafts
         or uid in admin_edit_client_drafts
@@ -1880,63 +1727,6 @@ def _has_active_vk_draft(message: Message) -> bool:
 async def handle_vk_text_messages(message: Message):
     user_id = message.from_id
     raw_text = (message.text or "").strip()
-
-    # 1. Master SMS code
-    if user_id in pending_master_logins and raw_text.isdigit() and len(raw_text) == 4:
-        session_data = pending_master_logins.get(user_id)
-        if session_data and not session_data.get("awaiting_phone"):
-            success, msg = confirm_master_login(session_data, raw_text)
-            if not success:
-                kb = Keyboard(inline=True)
-                kb.add(Callback("✏️ Ввести другой номер", {"cmd": "admin_masters_enter_phone"}))
-                kb.row()
-                kb.add(Callback("⬅️ Меню админки", {"cmd": "admin_menu"}))
-                await message.answer(f"❌ {msg}\n\nПопробуйте ввести код ещё раз:", keyboard=kb.get_json())
-                return
-            pending_master_logins.pop(user_id, None)
-            ok, count, sync_msg = sync_masters_appointments()
-            await message.answer(
-                "🎉 Аккаунт Masters успешно подключен!\n\n"
-                f"✅ {sync_msg}\n"
-                "Теперь бот будет автоматически отправлять клиентам напоминания накануне вечером и за 2 часа.",
-                keyboard=admin_menu_keyboard(),
-            )
-            return
-
-    # 2. Master phone input
-    if user_id in pending_master_logins and pending_master_logins.get(user_id, {}).get("awaiting_phone"):
-        if is_phone_number(raw_text):
-            await message.answer("⏳ Запрашиваю проверочный код в Masters...")
-            success, msg, session_data = request_master_login(raw_text)
-            if not success:
-                pending_master_logins[user_id] = {"awaiting_phone": True}
-                kb = Keyboard(inline=True)
-                kb.add(Callback("⬅️ Меню админки", {"cmd": "admin_menu"}))
-                await message.answer(
-                    f"❌ {msg}\n\nПопробуйте ввести номер телефона мастера ещё раз (например, +79991234567):",
-                    keyboard=kb.get_json(),
-                )
-                return
-            pending_master_logins[user_id] = session_data
-            kb = Keyboard(inline=True)
-            kb.add(Callback("✏️ Ввести другой номер", {"cmd": "admin_masters_enter_phone"}))
-            kb.row()
-            kb.add(Callback("⬅️ Меню админки", {"cmd": "admin_menu"}))
-            await message.answer(
-                f"📩 Код подтверждения отправлен\n\n"
-                f"На номер {session_data['phone_formatted']} отправлено СМС от Masters.\n\n"
-                "👉 Напишите 4 цифры из СМС в ответном сообщении:",
-                keyboard=kb.get_json(),
-            )
-            return
-        else:
-            kb = Keyboard(inline=True)
-            kb.add(Callback("⬅️ Меню админки", {"cmd": "admin_menu"}))
-            await message.answer(
-                "⚠️ Пожалуйста, введите корректный номер телефона мастера (например, +79991234567):",
-                keyboard=kb.get_json(),
-            )
-            return
 
     if not is_admin(user_id):
         return
@@ -2184,11 +1974,7 @@ async def handle_vk_text_messages(message: Message):
                 platform="manual",
             )
 
-            if ok and appt_id in pending_manual_bookings:
-                create_draft["step"] = "awaiting_masters_sms"
-                create_draft["appt_id"] = appt_id
-            else:
-                admin_create_drafts.pop(user_id, None)
+            admin_create_drafts.pop(user_id, None)
 
             if ok:
                 kb = Keyboard(inline=True)
@@ -2206,25 +1992,4 @@ async def handle_vk_text_messages(message: Message):
                 )
             else:
                 await message.answer(f"❌ Ошибка создания записи: {res_msg}")
-            return
-
-        if step == "awaiting_masters_sms":
-            code = raw_text.strip()
-            if not code.isdigit() or len(code) != 4:
-                await message.answer("⚠️ Код из СМС должен содержать 4 цифры. Перешли код, который получил клиент:")
-                return
-
-            appt_id = create_draft.get("appt_id")
-            ok_sms, msg_sms = await asyncio.to_thread(
-                confirm_manual_appointment_masters_sms, appt_id, code
-            )
-            admin_create_drafts.pop(user_id, None)
-            if ok_sms:
-                await message.answer(
-                    f"✅ {msg_sms}",
-                )
-            else:
-                await message.answer(
-                    f"⚠️ {msg_sms}\n\nЗапись остаётся в боте. Код можно запросить у клиента и отправить ещё раз."
-                )
             return

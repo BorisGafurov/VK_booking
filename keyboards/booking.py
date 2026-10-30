@@ -2,13 +2,13 @@ from typing import Any
 from vkbottle import Callback, Keyboard, OpenLink
 
 from config import BOOKING_URL
-from services.masters import SERVICES, calculate_services
+from services.booking import SERVICES, calculate_services
 
 
 def get_booking_keyboard() -> str:
     """Return inline keyboard with direct booking URL."""
     kb = Keyboard(inline=True)
-    kb.add(OpenLink(link=BOOKING_URL, label="🌐 Записаться на сайте Masters"))
+    kb.add(OpenLink(link=BOOKING_URL, label="🌐 Записаться на сайте «Срез»"))
     return kb.get_json()
 
 
@@ -27,7 +27,7 @@ def get_services_keyboard(selected_keys: list[str] | set[str]) -> str:
     next_text = f"📅 Выбрать время ({calc['total_price']} ₽)"
     kb.add(Callback(next_text[:40], {"cmd": "book_days"}))
     kb.row()
-    kb.add(OpenLink(link=BOOKING_URL, label="🌐 Записаться на сайте Masters"))
+    kb.add(OpenLink(link=BOOKING_URL, label="🌐 Записаться на сайте «Срез»"))
 
     return kb.get_json()
 
@@ -64,12 +64,4 @@ def get_slots_keyboard(slots: list[dict[str, Any]]) -> str:
 
     kb.add(Callback("◀️ Другой день", {"cmd": "book_days"}))
     kb.add(OpenLink(link=BOOKING_URL, label="🌐 На сайт"))
-    return kb.get_json()
-
-
-def get_sms_keyboard() -> str:
-    kb = Keyboard(inline=True)
-    kb.add(OpenLink(link=BOOKING_URL, label="🌐 Завершить на сайте Masters"))
-    kb.row()
-    kb.add(Callback("❌ Отменить запись", {"cmd": "book_cancel"}))
     return kb.get_json()
