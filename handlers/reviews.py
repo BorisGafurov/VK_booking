@@ -12,6 +12,7 @@ from services.reviews import (
     can_review_platform_appointment,
     create_review_from_platform,
     get_reviewable_for_platform,
+    get_reviews_for_platform,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,48 @@ def get_cancel_keyboard() -> str:
     kb = Keyboard(inline=True)
     kb.add(Callback("❌ Отмена", {"cmd": "review_cancel"}))
     return kb.get_json()
+
+
+@labeler.message(text=["⭐ Мои отзывы", "Мои отзывы", "мои отзывы", "/reviews"])
+async def show_my_vk_reviews(message: Message):
+    user_id = message.from_id
+    reviews = get_reviews_for_platform("vk", user_id)
+    reviewable = get_reviewable_for_platform("vk", user_id)
+
+    lines = ["⭐ Мои отзывы\n"]
+
+    if not reviews and not reviewable:
+        lines.append(
+            "У тебя пока нет оставленных отзывов.\n\n"
+            "После того как визит состоится и мастер подтвердит оплату, "
+            "здесь появится возможность оценить стрижку и сервис! 💈"
+        )
+        await message.answer("\n".join(lines))
+        return
+
+    kb = None
+    if reviewable:
+        lines.append("✂️ Визиты, ожидающие вашего отзыва:")
+        vk_kb = Keyboard(inline=True)
+        for v in reviewable[:3]:
+            svc = v.get("services") or "Визит"
+            time_str = str(v.get("appointment_time") or "")[:10]
+            lines.append(f"• {svc} ({time_str})")
+            vk_kb.add(Callback(f"✍️ Отзыв ({svc[:15]})", {"cmd": "review_start", "id": v["id"]}))
+            vk_kb.row()
+        kb = vk_kb.get_json()
+        lines.append("")
+
+    if reviews:
+        lines.append("📋 Ваша история отзывов:\n")
+        for r in reviews[:5]:
+            stars = "⭐" * int(r.get("rating") or 5)
+            created = str(r.get("created_at") or "")[:10]
+            comment = str(r.get("comment") or "")
+            svc = str(r.get("services") or "Стрижка")
+            lines.append(f"{stars} ({r.get('rating')}/5) · {created}\n✂️ {svc}\n«{comment}»\n")
+
+    await message.answer("\n".join(lines), keyboard=kb)
 
 
 @labeler.raw_event(

@@ -12,6 +12,8 @@ def get_main_menu(is_admin: bool = False) -> str:
     kb.row()
     kb.add(Text("🧴 Советы и товары"), color=KeyboardButtonColor.SECONDARY)
     kb.add(Text("🌐 Наш сайт"), color=KeyboardButtonColor.SECONDARY)
+    kb.row()
+    kb.add(Text("⭐ Мои отзывы"), color=KeyboardButtonColor.SECONDARY)
 
     if is_admin:
         kb.row()
