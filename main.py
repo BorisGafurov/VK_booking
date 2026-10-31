@@ -20,6 +20,7 @@ from handlers.booking import labeler as booking_labeler
 from handlers.my_appointments import labeler as my_appointments_labeler
 from handlers.navigation import labeler as navigation_labeler
 from handlers.referrals import labeler as referrals_labeler
+from handlers.reviews import labeler as reviews_labeler
 from handlers.start import labeler as start_labeler
 from keyboards.menu import get_main_menu
 from services.reminder_worker import run_reminder_worker
@@ -77,6 +78,7 @@ async def main():
     bot.labeler.load(my_appointments_labeler)
     bot.labeler.load(navigation_labeler)
     bot.labeler.load(advice_labeler)
+    bot.labeler.load(reviews_labeler)
     bot.labeler.load(fallback_labeler)
 
     worker_task = asyncio.create_task(run_reminder_worker(bot.api, "vk"))

@@ -16,6 +16,7 @@ from services.appointments import (
     reschedule_appointment,
 )
 from services.booking import get_schedule
+from services.reviews import get_reviewable_for_platform
 from handlers.ui import edit_or_send as _edit_or_send
 
 logger = logging.getLogger(__name__)
@@ -36,26 +37,39 @@ def _fmt_dt(dt_val) -> str:
     return dt_val.astimezone(SARATOV_TZ).strftime("%d.%m.%Y в %H:%M")
 
 
-def _my_appts_keyboard(appts: list[dict]) -> str:
+def _my_appts_keyboard(appts: list[dict], reviewable: list[dict] | None = None) -> str:
     kb = Keyboard(inline=True)
+    if reviewable:
+        for r in reviewable:
+            kb.add(Callback(f"⭐ Оставить отзыв ({_fmt_dt(r['appointment_time'])})"[:40], {"cmd": "review_start", "id": r["id"]}))
+            kb.row()
     for a in appts:
         kb.add(Callback(f"✏️ Перенести ({_fmt_dt(a['appointment_time'])})"[:40], {"cmd": "my_resched", "id": a["id"]}))
         kb.row()
         kb.add(Callback("❌ Отменить запись", {"cmd": "appt_cancel", "id": a["id"]}))
         kb.row()
-    if not appts:
+    if not appts and not reviewable:
         kb.add(Callback("✂️ Записаться", {"cmd": "book_services"}))
     return kb.get_json()
 
 
 async def _show_my_appointments(message: Message, user_id: int):
     appts = await asyncio.to_thread(get_user_upcoming_appointments, "vk", user_id)
-    if not appts:
-        text = (
-            "📋 У вас нет активных записей.\n\n"
-            "Запишись на удобное время — и запись появится здесь."
+    reviewable = await asyncio.to_thread(get_reviewable_for_platform, "vk", user_id)
+
+    parts: list[str] = []
+    if reviewable:
+        rev_lines = [
+            f"• {r.get('services') or 'Визит'} ({_fmt_dt(r['appointment_time'])})"
+            for r in reviewable[:3]
+        ]
+        parts.append(
+            "⭐ Ожидает вашего отзыва:\n"
+            + "\n".join(rev_lines)
+            + "\nНажмите кнопку ниже, чтобы оценить визит 👇"
         )
-    else:
+
+    if appts:
         blocks = []
         for a in appts:
             blocks.append(
@@ -63,9 +77,15 @@ async def _show_my_appointments(message: Message, user_id: int):
                 f"✂️ {a.get('services') or 'Стрижка'} — {a.get('total_price') or 0} ₽\n"
                 f"📍 {SALON_ADDRESS}"
             )
-        text = "📋 Твои записи:\n\n" + "\n\n".join(blocks)
+        parts.append("📋 Твои активные записи:\n\n" + "\n\n".join(blocks))
+    elif not reviewable:
+        parts.append(
+            "📋 У вас нет активных записей.\n\n"
+            "Запишись на удобное время — и запись появится здесь."
+        )
 
-    await message.answer(text, keyboard=_my_appts_keyboard(appts))
+    text = "\n\n".join(parts)
+    await message.answer(text, keyboard=_my_appts_keyboard(appts, reviewable))
 
 
 @labeler.message(
