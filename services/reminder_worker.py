@@ -52,6 +52,8 @@ def _get_review_invite_keyboard(appointment_id: int) -> str:
     kb = Keyboard(inline=True)
     for n in range(1, 6):
         kb.add(Callback(f"⭐ {n}", {"cmd": "review_rate", "id": appointment_id, "rating": n}))
+    kb.row()
+    kb.add(OpenLink(link="https://vk.ru/reviews-242475554", label="💬 Отзыв в группе ВКонтакте"))
     return kb.get_json()
 
 
@@ -341,6 +343,13 @@ async def run_reminder_worker(api: API, platform: str = "vk"):
                     except Exception as a_err:
                         logger.warning("Не удалось уведомить админа VK %s о новом отзыве: %s", admin_id, a_err)
                 mark_notification_sent(alert["id"])
+
+            # 7. Periodic VK community reviews synchronization (every 30 mins)
+            try:
+                from services.vk_reviews_sync import sync_vk_community_reviews
+                await sync_vk_community_reviews()
+            except Exception as sync_err:
+                logger.debug("VK community reviews sync check: %s", sync_err)
 
         except Exception as e:
             logger.error("Ошибка в цикле reminder worker VK: %s", e)
