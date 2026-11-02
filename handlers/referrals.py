@@ -229,6 +229,13 @@ def admin_appt_card_keyboard(appt: dict, current_filter: str, offset: int) -> st
         kb.add(Callback("🗓 Перенести", {"cmd": "admin_resched_start", "id": appt_id, "filter": current_filter, "offset": offset}))
         kb.add(Callback("❌ Отменить", {"cmd": "admin_cancel_appt", "id": appt_id, "filter": current_filter, "offset": offset}))
         kb.row()
+    elif status == "completed":
+        if not appt.get("payment_confirmed"):
+            kb.add(Callback("💰 Визит оплачен", {"cmd": "admin_paid_appt", "id": appt_id, "filter": current_filter, "offset": offset}))
+            kb.row()
+        kb.add(Callback("✏️ Имя / тел.", {"cmd": "admin_edit_client", "id": appt_id, "filter": current_filter, "offset": offset}))
+        kb.add(Callback("💰 Цена/услуга", {"cmd": "admin_edit_price", "id": appt_id, "filter": current_filter, "offset": offset}))
+        kb.row()
     else:
         kb.add(Callback("✏️ Имя / тел.", {"cmd": "admin_edit_client", "id": appt_id, "filter": current_filter, "offset": offset}))
         kb.add(Callback("💰 Цена/услуга", {"cmd": "admin_edit_price", "id": appt_id, "filter": current_filter, "offset": offset}))
@@ -562,37 +569,11 @@ async def admin_complete_appt_handler(event: MessageEvent):
         return
 
     if ref_notify:
-        if ref_notify.get("referrer_vk_id"):
-            try:
-                invited_name = ref_notify["invited_first_name"]
-                await event.ctx_api.messages.send(
-                    peer_id=ref_notify["referrer_vk_id"],
-                    random_id=random.randint(1, 2**31 - 1),
-                    message=(
-                        "🎉 Отличные новости!\n"
-                        f"Твой друг {invited_name} посетил салон!\n"
-                        f"Тебе начислен бонус: {ref_notify['amount']} ₽.\n\n"
-                        f"💰 Доступный баланс бонусов: {ref_notify['new_balance']} ₽.\n"
-                        "Ты можешь списать их при следующем визите к мастеру!"
-                    ),
-                )
-            except Exception as e:
-                logger.warning("Не удалось отправить уведомление рефереру: %s", e)
-
-        if ref_notify.get("invited_vk_id"):
-            try:
-                await event.ctx_api.messages.send(
-                    peer_id=ref_notify["invited_vk_id"],
-                    random_id=random.randint(1, 2**31 - 1),
-                    message=(
-                        "🎁 Спасибо за визит!\n"
-                        "Так как ты пришёл по приглашению друга, тебе начислено 300 ₽ бонусов на повторный визит!\n\n"
-                        f"💰 Твой баланс бонусов: {ref_notify.get('invited_new_balance', 300)} ₽.\n"
-                        "Ты сможешь списать их при следующей стрижке!"
-                    ),
-                )
-            except Exception as e:
-                logger.warning("Не удалось отправить уведомление приглашенному другу: %s", e)
+        try:
+            from core_bot.services.notify import notify_referral_reward
+            notify_referral_reward(ref_notify)
+        except Exception as e:
+            logger.warning("Не удалось отправить реферальное уведомление: %s", e)
 
     await safe_event_answer(event, snackbar=msg)
     # Refresh card
@@ -601,6 +582,37 @@ async def admin_complete_appt_handler(event: MessageEvent):
         try:
             await _edit_or_send(event, 
                 message=f"✅ {msg}\n\n" + f"📋 Карточка записи #{appt_id}\nСтатус: ✂️ Завершена (клиент пострижен)",
+                keyboard=admin_appt_card_keyboard(updated_appt, current_filter, offset),
+            )
+        except Exception:
+            pass
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_paid_appt",
+)
+async def admin_paid_appt_handler(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    payload = get_payload(event)
+    appt_id = int(payload.get("id", 0))
+    current_filter = payload.get("filter", "today")
+    offset = int(payload.get("offset", 0))
+
+    from services.reviews import mark_appointment_paid
+    ok, msg, appt, invite = mark_appointment_paid(appt_id)
+    await safe_event_answer(event, snackbar=msg[:60])
+
+    updated_appt = get_appointment(appt_id)
+    if updated_appt:
+        try:
+            await _edit_or_send(
+                event,
+                message=f"💰 Оплата подтверждена!\n\n📋 Карточка записи #{appt_id}\nСтатус: ✂️ Завершена (оплачена)",
                 keyboard=admin_appt_card_keyboard(updated_appt, current_filter, offset),
             )
         except Exception:
@@ -640,13 +652,10 @@ async def admin_cancel_appt_handler(event: MessageEvent):
     offset = int(payload.get("offset", 0))
 
     ok, msg, appt = cancel_appointment(appt_id)
-    if ok and appt and appt.get("platform_user_id") and appt.get("platform") == "vk":
+    if ok and appt:
         try:
-            await event.ctx_api.messages.send(
-                peer_id=appt["platform_user_id"],
-                random_id=random.randint(1, 2**31 - 1),
-                message="❌ Ваша запись была отменена мастером.\n\nЕсли у вас есть вопросы, напишите мастеру в сообщения группы.",
-            )
+            from core_bot.services.notify import notify_appointment_cancelled_by_master
+            notify_appointment_cancelled_by_master(appt)
         except Exception as e:
             logger.warning("Failed to notify client about cancel: %s", e)
 
@@ -766,19 +775,10 @@ async def admin_resched_time_handler(event: MessageEvent):
         return
 
     ok, msg, appt = reschedule_appointment(appt_id, new_dt)
-    if ok and appt and appt.get("platform_user_id") and appt.get("platform") == "vk":
+    if ok and appt:
         try:
-            await event.ctx_api.messages.send(
-                peer_id=appt["platform_user_id"],
-                random_id=random.randint(1, 2**31 - 1),
-                message=(
-                    "🗓 Ваша запись перенесена мастером!\n\n"
-                    f"⏰ Новое время: {format_dt(new_dt)}\n"
-                    f"✂️ Услуга: {appt.get('services')}\n"
-                    f"💰 Стоимость: {appt.get('total_price')} ₽\n\n"
-                    "Ждем вас!"
-                ),
-            )
+            from core_bot.services.notify import notify_appointment_rescheduled_by_master
+            notify_appointment_rescheduled_by_master(appt, format_dt(new_dt))
         except Exception as e:
             logger.warning("Failed to notify client: %s", e)
 
@@ -1904,19 +1904,10 @@ async def handle_vk_text_messages(message: Message):
             return
 
         ok, msg, appt = reschedule_appointment(appt_id, new_dt)
-        if ok and appt and appt.get("platform_user_id") and appt.get("platform") == "vk":
+        if ok and appt:
             try:
-                await message.ctx_api.messages.send(
-                    peer_id=appt["platform_user_id"],
-                    random_id=random.randint(1, 2**31 - 1),
-                    message=(
-                        "🗓 Ваша запись перенесена мастером!\n\n"
-                        f"⏰ Новое время: {format_dt(new_dt)}\n"
-                        f"✂️ Услуга: {appt.get('services')}\n"
-                        f"💰 Стоимость: {appt.get('total_price')} ₽\n\n"
-                        "Ждем вас!"
-                    ),
-                )
+                from core_bot.services.notify import notify_appointment_rescheduled_by_master
+                notify_appointment_rescheduled_by_master(appt, format_dt(new_dt))
             except Exception as e:
                 logger.warning("Failed to notify client: %s", e)
 

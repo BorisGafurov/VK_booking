@@ -13,6 +13,7 @@ from services.appointments import (
     get_due_evening_reminders,
     get_due_retention_reminders,
     mark_reminder_sent,
+    record_reminder_delivery,
 )
 from services.reviews import (
     get_pending_notifications,
@@ -101,8 +102,9 @@ def _resolve_platform_user_id(appt: dict, platform: str) -> int | None:
     if is_master_phone(norm_phone):
         return None
 
+    appt_platform = str(appt.get("platform") or "").lower()
     user_id = appt.get("platform_user_id")
-    if user_id and user_id != 0:
+    if user_id and user_id != 0 and appt_platform in ("", "web", "manual", platform):
         if _is_master_or_admin(user_id, platform):
             return None
         return user_id
@@ -126,11 +128,6 @@ def _resolve_platform_user_id(appt: dict, platform: str) -> int | None:
                 found_id = row[col]
                 if _is_master_or_admin(found_id, platform):
                     return None
-                conn.execute(
-                    "UPDATE appointments SET platform_user_id = %s, platform = %s WHERE id = %s",
-                    (found_id, platform, appt["id"]),
-                )
-                conn.commit()
                 return found_id
     return None
 
@@ -145,7 +142,7 @@ async def run_reminder_worker(api: API, platform: str = "vk"):
             for appt in evening_due:
                 target_user_id = _resolve_platform_user_id(appt, platform)
                 if not target_user_id:
-                    mark_reminder_sent(appt["id"], "evening")
+                    record_reminder_delivery(appt["id"], "evening", platform, "skipped", "no_recipient")
                     continue
 
                 dt = appt["appointment_time"]
@@ -172,6 +169,7 @@ async def run_reminder_worker(api: API, platform: str = "vk"):
                         keyboard=_get_confirmation_keyboard(appt["id"]),
                         random_id=secrets.randbits(31),
                     )
+                    record_reminder_delivery(appt["id"], "evening", platform)
                     mark_reminder_sent(appt["id"], "evening")
                     logger.info("Отправлено вечернее напоминание клиенту #%s (appt #%s)", target_user_id, appt["id"])
                 except Exception as send_err:
@@ -182,7 +180,7 @@ async def run_reminder_worker(api: API, platform: str = "vk"):
             for appt in morning_due:
                 target_user_id = _resolve_platform_user_id(appt, platform)
                 if not target_user_id:
-                    mark_reminder_sent(appt["id"], "morning")
+                    record_reminder_delivery(appt["id"], "morning", platform, "skipped", "no_recipient")
                     continue
 
                 dt = appt["appointment_time"]
@@ -206,6 +204,7 @@ async def run_reminder_worker(api: API, platform: str = "vk"):
                         keyboard=_get_confirmation_keyboard(appt["id"]),
                         random_id=secrets.randbits(31),
                     )
+                    record_reminder_delivery(appt["id"], "morning", platform)
                     mark_reminder_sent(appt["id"], "morning")
                     logger.info("Отправлено утреннее напоминание о подтверждении клиенту #%s (appt #%s)", target_user_id, appt["id"])
                 except Exception as send_err:
@@ -216,7 +215,7 @@ async def run_reminder_worker(api: API, platform: str = "vk"):
             for appt in two_h_due:
                 target_user_id = _resolve_platform_user_id(appt, platform)
                 if not target_user_id:
-                    mark_reminder_sent(appt["id"], "2h")
+                    record_reminder_delivery(appt["id"], "2h", platform, "skipped", "no_recipient")
                     continue
 
                 dt = appt["appointment_time"]
@@ -253,6 +252,7 @@ async def run_reminder_worker(api: API, platform: str = "vk"):
                         keyboard=keyboard,
                         random_id=secrets.randbits(31),
                     )
+                    record_reminder_delivery(appt["id"], "2h", platform)
                     mark_reminder_sent(appt["id"], "2h")
                     logger.info("Отправлено 2ч напоминание клиенту #%s (appt #%s, confirmed=%s)", target_user_id, appt["id"], is_confirmed)
                 except Exception as send_err:
@@ -263,7 +263,7 @@ async def run_reminder_worker(api: API, platform: str = "vk"):
             for appt in retention_due:
                 target_user_id = _resolve_platform_user_id(appt, platform)
                 if not target_user_id:
-                    mark_reminder_sent(appt["id"], "retention")
+                    record_reminder_delivery(appt["id"], "retention", platform, "skipped", "no_recipient")
                     continue
 
                 text = (
@@ -278,6 +278,7 @@ async def run_reminder_worker(api: API, platform: str = "vk"):
                         keyboard=_get_retention_keyboard(),
                         random_id=secrets.randbits(31),
                     )
+                    record_reminder_delivery(appt["id"], "retention", platform)
                     mark_reminder_sent(appt["id"], "retention")
                     logger.info("Отправлено retention напоминание клиенту #%s (appt #%s)", target_user_id, appt["id"])
                 except Exception as send_err:
@@ -344,7 +345,39 @@ async def run_reminder_worker(api: API, platform: str = "vk"):
                         logger.warning("Не удалось уведомить админа VK %s о новом отзыве: %s", admin_id, a_err)
                 mark_notification_sent(alert["id"])
 
-            # 7. Periodic VK community reviews synchronization (every 30 mins)
+            # 7. Master alerts about bookings made in the other messengers.
+            event_titles = {
+                "master_booking_created": "🔥 Новая онлайн-запись через бота!",
+                "master_booking_confirmed": "✅ Клиент подтвердил запись!",
+                "master_booking_cancelled": "⚠️ Клиент отменил запись!",
+                "master_booking_rescheduled": "🔄 Клиент перенёс запись",
+            }
+            for event_kind, event_title in event_titles.items():
+                events = get_pending_notifications(platform, event_kind)
+                for event in events:
+                    client_name = " ".join(
+                        part for part in (event.get("first_name"), event.get("last_name")) if part
+                    ) or "Клиент"
+                    event_text = (
+                        f"{event_title}\n\n"
+                        f"👤 Клиент: {client_name}\n"
+                        f"📱 Телефон: {event.get('phone') or '—'}\n"
+                        f"✂️ Услуги: {event.get('services') or '—'}\n"
+                        f"📅 Время: {event.get('appointment_time') or '—'}\n"
+                        f"💰 Сумма: {event.get('total_price') or '—'} ₽"
+                    )
+                    for admin_id in set(ADMIN_IDS) | set(MASTER_VK_IDS):
+                        try:
+                            await api.messages.send(
+                                user_id=admin_id,
+                                message=event_text,
+                                random_id=secrets.randbits(31),
+                            )
+                        except Exception as a_err:
+                            logger.warning("Не удалось уведомить админа VK %s (%s): %s", admin_id, event_kind, a_err)
+                    mark_notification_sent(event["id"])
+
+            # 8. Periodic VK community reviews synchronization (every 30 mins)
             try:
                 from services.vk_reviews_sync import sync_vk_community_reviews
                 await sync_vk_community_reviews()

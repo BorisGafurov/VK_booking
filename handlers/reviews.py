@@ -161,7 +161,7 @@ async def callback_review_cancel(event: MessageEvent):
     )
 
 
-@labeler.message()
+@labeler.message(func=lambda msg: msg.from_id in user_pending_review)
 async def handle_vk_review_comment(message: Message):
     user_id = message.from_id
     pending = user_pending_review.get(user_id)

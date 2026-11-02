@@ -247,10 +247,12 @@ async def _create_vk_booking_and_notify(
             platform="vk",
             platform_user_id=user_id,
             duration_min=calc["duration_minutes"],
+            validate_schedule=True,
         )
-    except SlotUnavailableError:
+    except SlotUnavailableError as err:
+        reason_msg = str(err).strip() or "Это время уже занято."
         text = (
-            "⚠️ Это время уже занято.\n\n"
+            f"⚠️ {reason_msg}\n\n"
             "Пожалуйста, выберите другой слот или запишитесь через сайт «Срез»:"
         )
         if isinstance(target_event_or_msg, MessageEvent):
