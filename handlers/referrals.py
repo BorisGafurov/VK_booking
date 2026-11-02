@@ -379,7 +379,8 @@ async def referrals(message: Message):
     text = (
         "🎁 Приглашай друзей и получай бонусы!\n\n"
         "Отправь свою персональную ссылку другу. "
-        f"Когда он впервые придет на стрижку или уход, тебе начислится {REFERRAL_REWARD_TEXT}!\n\n"
+        f"Когда он впервые придет на стрижку или уход, тебе начислится {REFERRAL_REWARD_TEXT}, "
+        f"и другу начислится {REFERRAL_REWARD_TEXT} на повторный визит!\n\n"
         f"🔗 Твоя реферальная ссылка:\n{referral_link}\n"
         f"(Или друг может просто написать в чат код: ref_{message.from_id})\n\n"
         "📊 Твоя статистика:\n"
@@ -560,22 +561,38 @@ async def admin_complete_appt_handler(event: MessageEvent):
         await event.show_snackbar(msg[:60])
         return
 
-    if ref_notify and ref_notify.get("referrer_vk_id"):
-        try:
-            invited_name = ref_notify["invited_first_name"]
-            await event.ctx_api.messages.send(
-                peer_id=ref_notify["referrer_vk_id"],
-                random_id=random.randint(1, 2**31 - 1),
-                message=(
-                    "🎉 Отличные новости!\n"
-                    f"Твой друг {invited_name} посетил салон!\n"
-                    f"Тебе начислен бонус: {ref_notify['amount']} ₽.\n\n"
-                    f"💰 Доступный баланс бонусов: {ref_notify['new_balance']} ₽.\n"
-                    "Ты можешь списать их при следующем визите к мастеру!"
-                ),
-            )
-        except Exception as e:
-            logger.warning("Не удалось отправить уведомление рефереру: %s", e)
+    if ref_notify:
+        if ref_notify.get("referrer_vk_id"):
+            try:
+                invited_name = ref_notify["invited_first_name"]
+                await event.ctx_api.messages.send(
+                    peer_id=ref_notify["referrer_vk_id"],
+                    random_id=random.randint(1, 2**31 - 1),
+                    message=(
+                        "🎉 Отличные новости!\n"
+                        f"Твой друг {invited_name} посетил салон!\n"
+                        f"Тебе начислен бонус: {ref_notify['amount']} ₽.\n\n"
+                        f"💰 Доступный баланс бонусов: {ref_notify['new_balance']} ₽.\n"
+                        "Ты можешь списать их при следующем визите к мастеру!"
+                    ),
+                )
+            except Exception as e:
+                logger.warning("Не удалось отправить уведомление рефереру: %s", e)
+
+        if ref_notify.get("invited_vk_id"):
+            try:
+                await event.ctx_api.messages.send(
+                    peer_id=ref_notify["invited_vk_id"],
+                    random_id=random.randint(1, 2**31 - 1),
+                    message=(
+                        "🎁 Спасибо за визит!\n"
+                        "Так как ты пришёл по приглашению друга, тебе начислено 300 ₽ бонусов на повторный визит!\n\n"
+                        f"💰 Твой баланс бонусов: {ref_notify.get('invited_new_balance', 300)} ₽.\n"
+                        "Ты сможешь списать их при следующей стрижке!"
+                    ),
+                )
+            except Exception as e:
+                logger.warning("Не удалось отправить уведомление приглашенному другу: %s", e)
 
     await safe_event_answer(event, snackbar=msg)
     # Refresh card
@@ -1264,22 +1281,38 @@ async def confirm_visit(event: MessageEvent):
 
     success, text, notify_data = mark_referral_visited(referral_id)
 
-    if success and notify_data and notify_data.get("referrer_vk_id"):
-        try:
-            invited_name = notify_data["invited_first_name"]
-            await event.ctx_api.messages.send(
-                peer_id=notify_data["referrer_vk_id"],
-                random_id=random.randint(1, 2**31 - 1),
-                message=(
-                    "🎉 Отличные новости!\n"
-                    f"Твой друг {invited_name} посетил салон!\n"
-                    f"Тебе начислен бонус: {notify_data['amount']} ₽.\n\n"
-                    f"💰 Доступный баланс бонусов: {notify_data['new_balance']} ₽.\n"
-                    "Ты можешь списать их при следующем визите к мастеру!"
-                ),
-            )
-        except Exception:
-            pass
+    if success and notify_data:
+        if notify_data.get("referrer_vk_id"):
+            try:
+                invited_name = notify_data["invited_first_name"]
+                await event.ctx_api.messages.send(
+                    peer_id=notify_data["referrer_vk_id"],
+                    random_id=random.randint(1, 2**31 - 1),
+                    message=(
+                        "🎉 Отличные новости!\n"
+                        f"Твой друг {invited_name} посетил салон!\n"
+                        f"Тебе начислен бонус: {notify_data['amount']} ₽.\n\n"
+                        f"💰 Доступный баланс бонусов: {notify_data['new_balance']} ₽.\n"
+                        "Ты можешь списать их при следующем визите к мастеру!"
+                    ),
+                )
+            except Exception:
+                pass
+
+        if notify_data.get("invited_vk_id"):
+            try:
+                await event.ctx_api.messages.send(
+                    peer_id=notify_data["invited_vk_id"],
+                    random_id=random.randint(1, 2**31 - 1),
+                    message=(
+                        "🎁 Спасибо за визит!\n"
+                        "Так как ты пришёл по приглашению друга, тебе начислено 300 ₽ бонусов на повторный визит!\n\n"
+                        f"💰 Твой баланс бонусов: {notify_data.get('invited_new_balance', 300)} ₽.\n"
+                        "Ты сможешь списать их при следующей стрижке!"
+                    ),
+                )
+            except Exception:
+                pass
 
     referrals_list, total = get_pending_referrals(limit=PAGE_SIZE, offset=offset)
     msg_text = f"ℹ️ {text}\n\n⏳ Ожидают подтверждения:"
