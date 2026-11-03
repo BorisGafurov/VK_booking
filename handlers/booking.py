@@ -216,10 +216,38 @@ async def callback_book_day(event: MessageEvent):
     try:
         await _edit_or_send(event, 
             message=f"🕒 Свободные окна на {title}:\n\nВыберите время начала:",
-            keyboard=get_slots_keyboard(slots),
+            keyboard=get_slots_keyboard(slots, page=0, day_key=day_key or ""),
         )
     except Exception as e:
         logger.warning("Error in callback_book_day: %s", e)
+    await event.send_empty_answer()
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "book_slots_page",
+)
+async def callback_book_slots_page(event: MessageEvent):
+    user_id = event.user_id
+    payload = get_payload(event)
+    day_key = payload.get("day") or user_selected_day.get(user_id, "")
+    page = int(payload.get("page", 0))
+
+    current = user_selected_services.get(user_id, {"hair"})
+    schedule = await asyncio.to_thread(get_schedule, current)
+    day_data = schedule.get(day_key)
+    slots = day_data["slots"] if day_data else []
+
+    title = day_data["title"] if day_data else day_key
+    try:
+        await _edit_or_send(
+            event,
+            message=f"🕒 Свободные окна на {title}:\n\nВыберите время начала:",
+            keyboard=get_slots_keyboard(slots, page=page, day_key=day_key or ""),
+        )
+    except Exception as e:
+        logger.warning("Error in callback_book_slots_page: %s", e)
     await event.send_empty_answer()
 
 

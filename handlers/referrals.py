@@ -937,7 +937,8 @@ async def admin_create_go_day_handler(event: MessageEvent):
 
     now = get_current_saratov_time()
     kb = Keyboard(inline=True)
-    for i in range(5):
+    day_list = []
+    for i in range(6):
         d = now + datetime.timedelta(days=i)
         day_key = d.strftime("%Y-%m-%d")
         title = f"{RU_WEEKDAYS[d.weekday()]}, {d.day} {RU_MONTHS[d.month]}"
@@ -945,11 +946,14 @@ async def admin_create_go_day_handler(event: MessageEvent):
             title += " (Сегодня)"
         elif i == 1:
             title += " (Завтра)"
-        kb.add(Callback(title, {"cmd": "admin_create_day", "day": day_key}))
+        day_list.append((title, day_key))
+
+    for i in range(0, len(day_list), 2):
+        for title, day_key in day_list[i : i + 2]:
+            kb.add(Callback(title[:40], {"cmd": "admin_create_day", "day": day_key}))
         kb.row()
 
-    kb.add(Callback("⬅️ Назад к услугам", {"cmd": "admin_create_start"}))
-    kb.row()
+    kb.add(Callback("⬅️ К услугам", {"cmd": "admin_create_start"}))
     kb.add(Callback("❌ Отмена", {"cmd": "admin_menu"}))
 
     try:
@@ -996,22 +1000,21 @@ async def admin_create_day_handler(event: MessageEvent):
 
     kb = Keyboard(inline=True)
     count = 0
-    for s in free_slots[:6]:
+    for s in free_slots[:8]:
         kb.add(Callback(f"🟢 {s}", {"cmd": "admin_create_time", "time": s}))
         count += 1
-        if count % 3 == 0:
+        if count % 4 == 0:
             kb.row()
-    if count % 3 != 0:
+    if count > 0 and count % 4 != 0:
         kb.row()
 
-    for b in busy_appts[:2]:
-        kb.add(Callback(f"🔴 {b['time']} (занято)"[:40], {"cmd": "admin_create_busy", "time": b["time"]}))
     if busy_appts:
+        for b in busy_appts[:2]:
+            kb.add(Callback(f"🔴 {b['time']}"[:40], {"cmd": "admin_create_busy", "time": b["time"]}))
         kb.row()
 
-    kb.add(Callback("✏️ Своё время (08:30...)", {"cmd": "admin_create_time_custom"}))
-    kb.row()
-    kb.add(Callback("⬅️ Назад к датам", {"cmd": "admin_create_start"}))
+    kb.add(Callback("✏️ Своё время", {"cmd": "admin_create_time_custom"}))
+    kb.add(Callback("⬅️ К датам", {"cmd": "admin_create_go_day"}))
 
     try:
         await _edit_or_send(event, 

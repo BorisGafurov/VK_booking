@@ -1223,6 +1223,23 @@ class TestVkBookingBot(unittest.IsolatedAsyncioTestCase):
         finally:
             revoke_user_role("vk", admin_id)
 
+    def test_vk_keyboards_row_limit(self):
+        import json
+        from keyboards.booking import get_slots_keyboard
+        from handlers.ui import _sanitize_vk_keyboard
+
+        # Generate 40 slots (as in a dense 15-minute grid)
+        fake_slots = [{"time": f"{10 + i // 4:02d}:{(i % 4) * 15:02d}", "timestamp": 1700000000 + i * 900} for i in range(40)]
+        kb_json = get_slots_keyboard(fake_slots, page=0, day_key="2026-11-10")
+        kb_obj = json.loads(kb_json)
+        self.assertLessEqual(len(kb_obj["buttons"]), 6, "Inline keyboard must not exceed 6 rows in VK API")
+
+        # Test sanitizer on an intentionally oversized keyboard (e.g. 10 rows)
+        bad_kb = {"inline": True, "buttons": [[{"action": {"type": "callback", "label": f"btn{r}"}}] for r in range(10)]}
+        clean_kb = _sanitize_vk_keyboard(bad_kb)
+        self.assertLessEqual(len(clean_kb["buttons"]), 6)
+
+
 if __name__ == "__main__":
     unittest.main()
 
