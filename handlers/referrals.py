@@ -963,22 +963,10 @@ async def admin_create_go_day_handler(event: MessageEvent):
     await safe_event_answer(event)
 
 
-@labeler.raw_event(
-    GroupEventType.MESSAGE_EVENT,
-    dataclass=MessageEvent,
-    func=lambda event: get_payload(event).get("cmd") == "admin_create_day",
-)
-async def admin_create_day_handler(event: MessageEvent):
-    if not is_admin(event.user_id):
-        await event.show_snackbar("Нет доступа.")
-        return
+ADMIN_CREATE_PAGE_SIZE = 6
 
-    payload = get_payload(event)
-    day_key = payload.get("day", "")
-    draft = admin_create_drafts.setdefault(event.user_id, {})
-    draft["day_key"] = day_key
-    draft["step"] = "time"
 
+async def _render_admin_create_time_vk(day_key: str, page: int = 0) -> tuple[str, Keyboard]:
     slots_info = await asyncio.to_thread(get_day_time_slots_status, day_key)
     free_slots = slots_info.get("free_slots", [])
     busy_appts = slots_info.get("busy_appts", [])
@@ -995,26 +983,102 @@ async def admin_create_day_handler(event: MessageEvent):
             c_name = b["client_name"] or "Клиент"
             lines.append(f"• {b['time']} — {c_name} ({b['services']})")
 
-    lines.append("\nВыберите свободное окно 🟢 или занятое 🔴 для овербукинга:")
+    # Combine free and busy slots, sorted chronologically
+    all_items: list[tuple[str, bool]] = []
+    for s in free_slots:
+        all_items.append((s, False))
+    for b in busy_appts:
+        all_items.append((b["time"], True))
+    all_items.sort(key=lambda x: x[0])
+
+    total_items = len(all_items)
+    total_pages = max(1, (total_items + ADMIN_CREATE_PAGE_SIZE - 1) // ADMIN_CREATE_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    start_idx = page * ADMIN_CREATE_PAGE_SIZE
+    end_idx = start_idx + ADMIN_CREATE_PAGE_SIZE
+    page_items = all_items[start_idx:end_idx]
+
+    page_hint = f" (стр. {page + 1}/{total_pages})" if total_pages > 1 else ""
+    lines.append(f"\nВыберите свободное окно 🟢 или занятое 🔴 для овербукинга{page_hint}:")
     msg_text = "\n".join(lines)
 
     kb = Keyboard(inline=True)
-    count = 0
-    for s in free_slots[:8]:
-        kb.add(Callback(f"🟢 {s}", {"cmd": "admin_create_time", "time": s}))
-        count += 1
-        if count % 4 == 0:
-            kb.row()
-    if count > 0 and count % 4 != 0:
+    # 2 buttons per row for large, unclipped readable labels
+    for i in range(0, len(page_items), 2):
+        for time_str, is_busy in page_items[i : i + 2]:
+            if is_busy:
+                kb.add(Callback(f"🔴 {time_str}"[:40], {"cmd": "admin_create_busy", "time": time_str}))
+            else:
+                kb.add(Callback(f"🟢 {time_str}", {"cmd": "admin_create_time", "time": time_str}))
         kb.row()
 
-    if busy_appts:
-        for b in busy_appts[:2]:
-            kb.add(Callback(f"🔴 {b['time']}"[:40], {"cmd": "admin_create_busy", "time": b["time"]}))
+    # Pagination row (at most 2 buttons)
+    has_prev = page > 0
+    has_next = end_idx < total_items
+    if has_prev or has_next:
+        if has_prev:
+            kb.add(Callback("◀️ Ранее", {"cmd": "admin_create_time_page", "page": page - 1, "day": day_key}))
+        if has_next:
+            kb.add(Callback("Позже ▶️", {"cmd": "admin_create_time_page", "page": page + 1, "day": day_key}))
         kb.row()
 
+    # Navigation row (2 buttons)
     kb.add(Callback("✏️ Своё время", {"cmd": "admin_create_time_custom"}))
     kb.add(Callback("⬅️ К датам", {"cmd": "admin_create_go_day"}))
+
+    return msg_text, kb
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_create_day",
+)
+async def admin_create_day_handler(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    payload = get_payload(event)
+    day_key = payload.get("day", "")
+    draft = admin_create_drafts.setdefault(event.user_id, {})
+    draft["day_key"] = day_key
+    draft["step"] = "time"
+
+    msg_text, kb = await _render_admin_create_time_vk(day_key, page=0)
+
+    try:
+        await _edit_or_send(event, 
+            message=msg_text,
+            keyboard=kb.get_json(),
+        )
+    except Exception:
+        pass
+
+    await safe_event_answer(event)
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_create_time_page",
+)
+async def admin_create_time_page_handler(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    payload = get_payload(event)
+    day_key = payload.get("day", "")
+    page = int(payload.get("page", 0))
+
+    draft = admin_create_drafts.setdefault(event.user_id, {})
+    if day_key:
+        draft["day_key"] = day_key
+    else:
+        day_key = draft.get("day_key", "")
+
+    msg_text, kb = await _render_admin_create_time_vk(day_key, page=page)
 
     try:
         await _edit_or_send(event, 

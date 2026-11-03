@@ -10,8 +10,11 @@ logger = logging.getLogger(__name__)
 
 def _sanitize_vk_keyboard(keyboard: Any) -> Any:
     """
-    Ensures inline keyboards never exceed the VK API limit of 6 rows.
-    If an inline keyboard has > 6 rows, trims it to 6 rows (retaining the last navigation row).
+    Ensures inline keyboards never violate VK API constraints:
+    1. Maximum 6 rows.
+    2. Maximum 10 buttons total across all rows.
+    3. Maximum 5 buttons per row.
+    If an inline keyboard exceeds any limit, sanitizes it safely while preserving navigation buttons.
     """
     if not keyboard:
         return keyboard
@@ -19,14 +22,47 @@ def _sanitize_vk_keyboard(keyboard: Any) -> Any:
         is_str = isinstance(keyboard, str)
         kb_data = json.loads(keyboard) if is_str else keyboard
         if isinstance(kb_data, dict) and kb_data.get("inline"):
-            buttons = kb_data.get("buttons", [])
-            if len(buttons) > 6:
+            rows = kb_data.get("buttons", [])
+            if not rows:
+                return keyboard
+
+            total_buttons = sum(len(r) for r in rows)
+            needs_sanitization = (
+                len(rows) > 6 
+                or total_buttons > 10 
+                or any(len(r) > 5 for r in rows)
+            )
+
+            if needs_sanitization:
                 logger.warning(
-                    "VK inline keyboard exceeded 6 rows (%d rows), trimming to 6 to satisfy VK API limits",
-                    len(buttons),
+                    "Sanitizing VK inline keyboard (had %d rows, %d buttons total to satisfy VK API limits)",
+                    len(rows),
+                    total_buttons,
                 )
-                trimmed_buttons = buttons[:5] + [buttons[-1]]
-                kb_data["buttons"] = trimmed_buttons
+                nav_row = rows[-1] if len(rows) > 1 else None
+                content_rows = rows[:-1] if nav_row else rows
+
+                max_content_rows = 5 if nav_row else 6
+                content_rows = content_rows[:max_content_rows]
+
+                clean_nav = nav_row[:5] if nav_row else []
+                max_content_buttons = max(0, 10 - len(clean_nav))
+
+                final_rows = []
+                curr_buttons = 0
+                for r in content_rows:
+                    allowed = max_content_buttons - curr_buttons
+                    if allowed <= 0:
+                        break
+                    take = r[:5][:allowed]
+                    if take:
+                        final_rows.append(take)
+                        curr_buttons += len(take)
+
+                if clean_nav:
+                    final_rows.append(clean_nav)
+
+                kb_data["buttons"] = final_rows[:6]
                 if is_str:
                     return json.dumps(kb_data, ensure_ascii=False)
                 return kb_data

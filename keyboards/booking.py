@@ -50,7 +50,7 @@ def get_days_keyboard(days_map: dict[str, Any]) -> str:
     return kb.get_json()
 
 
-PAGE_SLOTS_COUNT = 12
+PAGE_SLOTS_COUNT = 6
 
 
 def get_slots_keyboard(slots: list[dict[str, Any]], page: int = 0, day_key: str = "") -> str:
@@ -68,13 +68,13 @@ def get_slots_keyboard(slots: list[dict[str, Any]], page: int = 0, day_key: str 
     end_idx = start_idx + PAGE_SLOTS_COUNT
     page_slots = slots[start_idx:end_idx]
 
-    # Slots grid: 4 buttons per row (at most 3 rows = 12 buttons)
-    for i in range(0, len(page_slots), 4):
-        for s in page_slots[i : i + 4]:
+    # Slots grid: 2 buttons per row for maximum readability on mobile screens (at most 3 rows = 6 buttons)
+    for i in range(0, len(page_slots), 2):
+        for s in page_slots[i : i + 2]:
             kb.add(Callback(f"🕒 {s['time']}", {"cmd": "book_slot", "ts": s["timestamp"]}))
         kb.row()
 
-    # Pagination row if multiple pages (at most 1 row)
+    # Pagination row if multiple pages (at most 1 row, 2 buttons)
     has_prev = page > 0
     has_next = end_idx < total_slots
     if has_prev or has_next:
@@ -84,7 +84,7 @@ def get_slots_keyboard(slots: list[dict[str, Any]], page: int = 0, day_key: str 
             kb.add(Callback("Позже ▶️", {"cmd": "book_slots_page", "page": page + 1, "day": day_key}))
         kb.row()
 
-    # Navigation row (1 row)
+    # Navigation row (1 row, 2 buttons)
     kb.add(Callback("◀️ Другой день", {"cmd": "book_days"}))
     kb.add(OpenLink(link=BOOKING_URL, label="🌐 На сайт"))
     return kb.get_json()

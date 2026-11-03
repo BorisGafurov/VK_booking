@@ -1223,21 +1223,34 @@ class TestVkBookingBot(unittest.IsolatedAsyncioTestCase):
         finally:
             revoke_user_role("vk", admin_id)
 
-    def test_vk_keyboards_row_limit(self):
+    async def test_vk_keyboards_limits(self):
         import json
         from keyboards.booking import get_slots_keyboard
         from handlers.ui import _sanitize_vk_keyboard
+        from handlers.referrals import _render_admin_create_time_vk
 
         # Generate 40 slots (as in a dense 15-minute grid)
         fake_slots = [{"time": f"{10 + i // 4:02d}:{(i % 4) * 15:02d}", "timestamp": 1700000000 + i * 900} for i in range(40)]
         kb_json = get_slots_keyboard(fake_slots, page=0, day_key="2026-11-10")
         kb_obj = json.loads(kb_json)
         self.assertLessEqual(len(kb_obj["buttons"]), 6, "Inline keyboard must not exceed 6 rows in VK API")
+        total_buttons = sum(len(r) for r in kb_obj["buttons"])
+        self.assertLessEqual(total_buttons, 10, "Inline keyboard must not exceed 10 buttons total in VK API")
 
-        # Test sanitizer on an intentionally oversized keyboard (e.g. 10 rows)
-        bad_kb = {"inline": True, "buttons": [[{"action": {"type": "callback", "label": f"btn{r}"}}] for r in range(10)]}
+        # Test admin create time keyboard limits & 2-per-row layout
+        msg_text, admin_kb = await _render_admin_create_time_vk("2026-11-10", page=0)
+        admin_kb_obj = json.loads(admin_kb.get_json())
+        self.assertLessEqual(len(admin_kb_obj["buttons"]), 6)
+        self.assertLessEqual(sum(len(r) for r in admin_kb_obj["buttons"]), 10)
+        # Ensure slot rows have at most 2 buttons per row for mobile readability
+        for r in admin_kb_obj["buttons"][:-2]:
+            self.assertLessEqual(len(r), 2)
+
+        # Test sanitizer on an intentionally oversized keyboard (e.g. 10 rows, 20 buttons)
+        bad_kb = {"inline": True, "buttons": [[{"action": {"type": "callback", "label": f"btn{r}_{c}"}} for c in range(2)] for r in range(10)]}
         clean_kb = _sanitize_vk_keyboard(bad_kb)
         self.assertLessEqual(len(clean_kb["buttons"]), 6)
+        self.assertLessEqual(sum(len(r) for r in clean_kb["buttons"]), 10)
 
 
 if __name__ == "__main__":
