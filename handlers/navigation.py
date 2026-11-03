@@ -47,4 +47,6 @@ async def site_handler(message: Message):
         f"{WEB_APP_URL}\n\n"
         "На сайте вы можете выбрать услуги, посмотреть доступные окна и воспользоваться персональным бонусом 300 ₽!"
     )
-    await message.answer(text)
+    kb = Keyboard(inline=True)
+    kb.add(OpenLink(link=WEB_APP_URL, label="🌐 Перейти на сайт"))
+    await message.answer(text, keyboard=kb.get_json())

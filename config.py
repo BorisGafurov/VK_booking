@@ -10,7 +10,7 @@ VK_TOKEN = (os.getenv("VK_TOKEN") or os.getenv("BOT_TOKEN") or "").strip()
 
 BOOKING_URL = os.getenv(
     "BOOKING_URL",
-    "https://srezforma.ru",
+    "https://srezforma.ru/go/vk",
 )
 WEB_APP_URL = os.getenv("WEB_APP_URL", "").strip() or BOOKING_URL
 

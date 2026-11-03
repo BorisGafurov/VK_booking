@@ -8,7 +8,7 @@ from services.booking import SERVICES, calculate_services
 def get_booking_keyboard() -> str:
     """Return inline keyboard with direct booking URL."""
     kb = Keyboard(inline=True)
-    kb.add(OpenLink(link=BOOKING_URL, label="🌐 Записаться на сайте «Срез»"))
+    kb.add(OpenLink(link=BOOKING_URL, label="🌐 Перейти на сайт"))
     return kb.get_json()
 
 
@@ -27,7 +27,7 @@ def get_services_keyboard(selected_keys: list[str] | set[str]) -> str:
     next_text = f"📅 Выбрать время ({calc['total_price']} ₽)"
     kb.add(Callback(next_text[:40], {"cmd": "book_days"}))
     kb.row()
-    kb.add(OpenLink(link=BOOKING_URL, label="🌐 Записаться на сайте «Срез»"))
+    kb.add(OpenLink(link=BOOKING_URL, label="🌐 Перейти на сайт"))
 
     return kb.get_json()
 
@@ -46,7 +46,7 @@ def get_days_keyboard(days_map: dict[str, Any]) -> str:
         kb.row()
 
     kb.add(Callback("◀️ К услугам", {"cmd": "book_services"}))
-    kb.add(OpenLink(link=BOOKING_URL, label="🌐 На сайт"))
+    kb.add(OpenLink(link=BOOKING_URL, label="🌐 Перейти на сайт"))
     return kb.get_json()
 
 
@@ -60,7 +60,7 @@ def get_slots_keyboard(slots: list[dict[str, Any]], page: int = 0, day_key: str 
         kb.add(Callback("Нет свободных окон", {"cmd": "noop"}))
         kb.row()
         kb.add(Callback("◀️ Другой день", {"cmd": "book_days"}))
-        kb.add(OpenLink(link=BOOKING_URL, label="🌐 На сайт"))
+        kb.add(OpenLink(link=BOOKING_URL, label="🌐 Перейти на сайт"))
         return kb.get_json()
 
     total_slots = len(slots)
@@ -86,5 +86,5 @@ def get_slots_keyboard(slots: list[dict[str, Any]], page: int = 0, day_key: str 
 
     # Navigation row (1 row, 2 buttons)
     kb.add(Callback("◀️ Другой день", {"cmd": "book_days"}))
-    kb.add(OpenLink(link=BOOKING_URL, label="🌐 На сайт"))
+    kb.add(OpenLink(link=BOOKING_URL, label="🌐 Перейти на сайт"))
     return kb.get_json()
