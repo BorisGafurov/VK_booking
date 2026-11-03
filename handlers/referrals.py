@@ -36,7 +36,13 @@ from services.client_import import (
     import_clients_from_text,
     update_appointment_client_details,
 )
-from services.booking import get_service_options_for_creation
+from services.booking import (
+    SERVICES,
+    calculate_services,
+    get_service_options_for_creation,
+    parse_admin_client_info,
+    parse_admin_custom_time,
+)
 from services.referrals import (
     build_referral_link,
     get_active_rewards,
@@ -820,6 +826,36 @@ async def admin_resched_custom_handler(event: MessageEvent):
     await safe_event_answer(event)
 
 
+def _render_admin_create_services_vk(selected_keys: set[str]) -> tuple[str, Keyboard]:
+    calc = calculate_services(selected_keys)
+    names_str = " + ".join(calc["names"]) if calc["names"] else "Ничего не выбрано"
+    text = (
+        "➕ Создание новой записи мастером\n\n"
+        "Шаг 1 из 4: Выберите услуги\n\n"
+        "💡 Нажмите на услугу, чтобы отметить её галочкой ✅ или снять ⚪️:\n\n"
+        f"📋 Выбрано: {names_str}\n"
+        f"💰 Итого: {calc['total_price']} ₽ ({calc['duration_text']})\n\n"
+        "После выбора нажмите «📅 Выбрать дату»:"
+    )
+    kb = Keyboard(inline=True)
+    active_keys = set(calc["keys"])
+    for key, info in SERVICES.items():
+        is_sel = key in active_keys
+        icon = "✅" if is_sel else "⚪️"
+        kb.add(
+            Callback(
+                f"{icon} {info['name']} · {info['price']} ₽"[:40],
+                {"cmd": "admin_create_toggle", "svc_key": key},
+            )
+        )
+        kb.row()
+    if active_keys:
+        kb.add(Callback(f"📅 Выбрать дату ({calc['total_price']} ₽)"[:40], {"cmd": "admin_create_go_day"}))
+        kb.row()
+    kb.add(Callback("⬅️ Отмена", {"cmd": "admin_menu"}))
+    return text, kb
+
+
 # Manual appointment creation
 @labeler.raw_event(
     GroupEventType.MESSAGE_EVENT,
@@ -831,42 +867,72 @@ async def admin_create_start_handler(event: MessageEvent):
         await event.show_snackbar("Нет доступа.")
         return
 
-    admin_create_drafts[event.user_id] = {"step": "service"}
+    admin_create_drafts[event.user_id] = {
+        "step": "service",
+        "services": {"hair"},
+    }
 
-    opts = await asyncio.to_thread(get_service_options_for_creation)
-    kb = Keyboard(inline=True)
-    for o in opts[:3]:
-        kb.add(Callback(f"{o['name']} ({o['price']} ₽)"[:40], {"cmd": "admin_create_svc", "svc": o["name"], "price": o["price"]}))
-        kb.row()
-    kb.add(Callback("✏️ Другая услуга", {"cmd": "admin_create_svc_custom"}))
-    kb.row()
-    kb.add(Callback("⬅️ Отмена", {"cmd": "admin_menu"}))
-
+    text, kb = _render_admin_create_services_vk({"hair"})
     try:
-        await _edit_or_send(event, 
-            message="➕ Создание новой записи мастером\n\nШаг 1 из 4: Выберите услугу или введите другое название:",
-            keyboard=kb.get_json(),
-        )
+        await _edit_or_send(event, message=text, keyboard=kb.get_json())
     except Exception:
         pass
-
     await safe_event_answer(event)
 
 
 @labeler.raw_event(
     GroupEventType.MESSAGE_EVENT,
     dataclass=MessageEvent,
-    func=lambda event: get_payload(event).get("cmd") == "admin_create_svc",
+    func=lambda event: get_payload(event).get("cmd") == "admin_create_toggle",
 )
-async def admin_create_svc_handler(event: MessageEvent):
+async def admin_create_toggle_handler(event: MessageEvent):
     if not is_admin(event.user_id):
         await event.show_snackbar("Нет доступа.")
         return
 
     payload = get_payload(event)
-    draft = admin_create_drafts.setdefault(event.user_id, {})
-    draft["service"] = payload.get("svc", "Стрижка (МУЖСКАЯ)")
-    draft["price"] = int(payload.get("price", 2300))
+    key = payload.get("svc_key", "hair")
+    draft = admin_create_drafts.setdefault(event.user_id, {"step": "service", "services": {"hair"}})
+    current = set(draft.get("services", {"hair"}))
+
+    alert_msg = None
+    if key in current:
+        if len(current) > 1:
+            current.remove(key)
+        else:
+            alert_msg = "Нужно выбрать хотя бы одну услугу"
+    else:
+        current.add(key)
+
+    draft["services"] = current
+    text, kb = _render_admin_create_services_vk(current)
+    try:
+        await _edit_or_send(event, message=text, keyboard=kb.get_json())
+    except Exception:
+        pass
+
+    if alert_msg:
+        await event.show_snackbar(alert_msg)
+    else:
+        await safe_event_answer(event)
+
+
+@labeler.raw_event(
+    GroupEventType.MESSAGE_EVENT,
+    dataclass=MessageEvent,
+    func=lambda event: get_payload(event).get("cmd") == "admin_create_go_day",
+)
+async def admin_create_go_day_handler(event: MessageEvent):
+    if not is_admin(event.user_id):
+        await event.show_snackbar("Нет доступа.")
+        return
+
+    draft = admin_create_drafts.setdefault(event.user_id, {"step": "service", "services": {"hair"}})
+    current = set(draft.get("services", {"hair"}))
+    calc = calculate_services(current)
+    draft["service"] = " + ".join(calc["names"])
+    draft["price"] = calc["total_price"]
+    draft["duration_min"] = calc["duration_minutes"]
     draft["step"] = "day"
 
     now = get_current_saratov_time()
@@ -882,43 +948,14 @@ async def admin_create_svc_handler(event: MessageEvent):
         kb.add(Callback(title, {"cmd": "admin_create_day", "day": day_key}))
         kb.row()
 
-    kb.add(Callback("⬅️ Отмена", {"cmd": "admin_menu"}))
+    kb.add(Callback("⬅️ Назад к услугам", {"cmd": "admin_create_start"}))
+    kb.row()
+    kb.add(Callback("❌ Отмена", {"cmd": "admin_menu"}))
 
     try:
-        await _edit_or_send(event, 
-            message="➕ Шаг 2 из 4: Выберите дату записи:",
-            keyboard=kb.get_json(),
-        )
+        await _edit_or_send(event, message="➕ Шаг 2 из 4: Выберите дату записи:", keyboard=kb.get_json())
     except Exception:
         pass
-
-    await safe_event_answer(event)
-
-
-@labeler.raw_event(
-    GroupEventType.MESSAGE_EVENT,
-    dataclass=MessageEvent,
-    func=lambda event: get_payload(event).get("cmd") == "admin_create_svc_custom",
-)
-async def admin_create_svc_custom_handler(event: MessageEvent):
-    if not is_admin(event.user_id):
-        await event.show_snackbar("Нет доступа.")
-        return
-
-    draft = admin_create_drafts.setdefault(event.user_id, {})
-    draft["step"] = "awaiting_custom_service"
-
-    kb = Keyboard(inline=True)
-    kb.add(Callback("⬅️ Отмена", {"cmd": "admin_create_start"}))
-
-    try:
-        await _edit_or_send(event, 
-            message="✏️ Введите название услуги в чат (например: Моделирование бороды VIP):",
-            keyboard=kb.get_json(),
-        )
-    except Exception:
-        pass
-
     await safe_event_answer(event)
 
 
@@ -1082,7 +1119,12 @@ async def admin_create_time_custom_handler(event: MessageEvent):
 
     try:
         await _edit_or_send(event, 
-            message=f"✏️ Введите любое время записи на {draft.get('day_key')}\n\nНапишите в ответном сообщении (например 08:30 или 22:00):",
+            message=(
+                f"✏️ Введите любое время записи на {draft.get('day_key')}\n\n"
+                "Напишите в ответном сообщении время (например 16:00 или 16.00).\n\n"
+                "💡 Можно сразу отправить время вместе с телефоном и именем:\n"
+                "16.00 +7 (905) 380-72-54 Владимир"
+            ),
             keyboard=kb.get_json(),
         )
     except Exception:
@@ -1921,64 +1963,73 @@ async def handle_vk_text_messages(message: Message):
     if create_draft:
         step = create_draft.get("step")
 
-        if step == "awaiting_custom_service":
-            create_draft["service"] = raw_text
-            create_draft["price"] = 2300
-            create_draft["step"] = "day"
-
-            now = get_current_saratov_time()
-            kb = Keyboard(inline=True)
-            for i in range(5):
-                d = now + datetime.timedelta(days=i)
-                day_key = d.strftime("%Y-%m-%d")
-                title = f"{RU_WEEKDAYS[d.weekday()]}, {d.day} {RU_MONTHS[d.month]}"
-                kb.add(Callback(title, {"cmd": "admin_create_day", "day": day_key}))
-                kb.row()
-            kb.add(Callback("⬅️ Отмена", {"cmd": "admin_menu"}))
-            await message.answer(f"✂️ Услуга: {raw_text}\n\nШаг 2 из 4: Выберите дату записи:", keyboard=kb.get_json())
-            return
-
         if step == "awaiting_custom_time":
-            m = re.match(r"^(\d{1,2})[:.-](\d{2})$", raw_text)
-            if not m:
-                await message.answer("⚠️ Неверный формат. Введите время в формате 08:30 или 22:00:")
+            time_str, rest = parse_admin_custom_time(raw_text)
+            if not time_str:
+                await message.answer(
+                    "⚠️ Неверный формат времени. Введите время, например 16:00 или 16.00\n"
+                    "(можно сразу отправить с телефоном и именем: 16:00 +7 (905) 380-72-54 Владимир)"
+                )
                 return
-            h, mm = int(m.group(1)), int(m.group(2))
-            create_draft["time_str"] = f"{h:02d}:{mm:02d}"
+
+            create_draft["time_str"] = time_str
+            phone, name, custom_price = parse_admin_client_info(rest, default_price=create_draft.get("price", 2300))
+            if phone:
+                create_draft["phone"] = phone
+                create_draft["name"] = name
+                create_draft["price"] = custom_price
+
+                day_key = create_draft["day_key"]
+                dt_obj = datetime.datetime.strptime(f"{day_key} {time_str}", "%Y-%m-%d %H:%M").replace(tzinfo=SARATOV_TZ)
+
+                ok, res_msg, appt_id = await asyncio.to_thread(
+                    create_manual_appointment,
+                    phone=phone,
+                    appointment_time=dt_obj,
+                    services=create_draft.get("service", "Мужская стрижка"),
+                    total_price=custom_price,
+                    client_name=name,
+                    platform="manual",
+                    duration_min=create_draft.get("duration_min", 75),
+                    allow_overbooking=True,
+                )
+
+                admin_create_drafts.pop(user_id, None)
+
+                if ok:
+                    kb = Keyboard(inline=True)
+                    kb.add(Callback("📋 К календарю", {"cmd": "admin_appts", "filter": "today", "offset": 0}))
+                    kb.add(Callback("➕ Создать ещё", {"cmd": "admin_create_start"}))
+                    kb.row()
+                    kb.add(Callback("⬅️ Главное меню", {"cmd": "admin_menu"}))
+                    await message.answer(
+                        f"🎉 {res_msg}\n\n"
+                        f"👤 Клиент: {name} ({phone})\n"
+                        f"⏰ Дата и время: {format_dt(dt_obj)}\n"
+                        f"✂️ Услуга: {create_draft.get('service', 'Мужская стрижка')}\n"
+                        f"💰 Стоимость: {custom_price} ₽",
+                        keyboard=kb.get_json(),
+                    )
+                else:
+                    await message.answer(f"❌ Ошибка создания записи: {res_msg}")
+                return
+
             create_draft["step"] = "awaiting_client_info"
             kb = Keyboard(inline=True)
             kb.add(Callback("⬅️ Отмена", {"cmd": "admin_menu"}))
             await message.answer(
-                f"⏰ Время: {create_draft['time_str']}\n\n👉 Теперь отправьте телефон и имя клиента (например: +79991234567 Иван или с ценой: 89991234567 Иван 1200):",
+                f"⏰ Время установлено: {time_str}\n\n"
+                "👉 Теперь отправьте телефон и имя клиента:\n"
+                "Например: +7 (905) 380-72-54 Иван или 8 (000) 000-00-00 Иван 2000",
                 keyboard=kb.get_json(),
             )
             return
 
         if step == "awaiting_client_info":
-            phone = ""
-            custom_price = create_draft.get("price", 2300)
-
-            for token in tokens:
-                digits = re.sub(r"\D", "", token)
-                if len(digits) >= 10:
-                    phone = normalize_phone(token)
-                elif token.isdigit() and int(token) >= 100:
-                    custom_price = int(token)
-
+            phone, name, custom_price = parse_admin_client_info(raw_text, default_price=create_draft.get("price", 2300))
             if not phone:
-                await message.answer("⚠️ Пожалуйста, укажите номер телефона клиента (например: +79991234567 Иван):")
+                await message.answer("⚠️ Пожалуйста, укажите номер телефона клиента в любом формате (например: +7 (905) 380-72-54 Иван или 8 (000) 000-00-00):")
                 return
-
-            name_parts = []
-            for t in tokens:
-                digits = re.sub(r"\D", "", t)
-                if len(digits) >= 10:
-                    continue
-                if t.isdigit() and (int(t) >= 100 or int(t) == custom_price):
-                    continue
-                name_parts.append(t)
-
-            name = " ".join(name_parts) if name_parts else "Клиент"
 
             create_draft["phone"] = phone
             create_draft["name"] = name
@@ -1992,10 +2043,12 @@ async def handle_vk_text_messages(message: Message):
                 create_manual_appointment,
                 phone=phone,
                 appointment_time=dt_obj,
-                services=create_draft["service"],
+                services=create_draft.get("service", "Мужская стрижка"),
                 total_price=custom_price,
                 client_name=name,
                 platform="manual",
+                duration_min=create_draft.get("duration_min", 75),
+                allow_overbooking=True,
             )
 
             admin_create_drafts.pop(user_id, None)
@@ -2010,7 +2063,7 @@ async def handle_vk_text_messages(message: Message):
                     f"🎉 {res_msg}\n\n"
                     f"👤 Клиент: {name} ({phone})\n"
                     f"⏰ Дата и время: {format_dt(dt_obj)}\n"
-                    f"✂️ Услуга: {create_draft['service']}\n"
+                    f"✂️ Услуга: {create_draft.get('service', 'Мужская стрижка')}\n"
                     f"💰 Стоимость: {custom_price} ₽",
                     keyboard=kb.get_json(),
                 )
