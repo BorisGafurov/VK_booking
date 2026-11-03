@@ -54,6 +54,8 @@ def _get_review_invite_keyboard(appointment_id: int) -> str:
     for n in range(1, 6):
         kb.add(Callback(f"⭐ {n}", {"cmd": "review_rate", "id": appointment_id, "rating": n}))
     kb.row()
+    kb.add(Callback("✂️ Записаться на следующий визит", {"cmd": "book_services"}))
+    kb.row()
     kb.add(OpenLink(link="https://vk.ru/reviews-242475554", label="💬 Отзыв в группе ВКонтакте"))
     return kb.get_json()
 
@@ -327,8 +329,10 @@ async def run_reminder_worker(api: API, platform: str = "vk"):
                 text = (
                     "✂️ Спасибо, что посетил салон Срез!\n\n"
                     f"Визит: {services_name}\n\n"
-                    "Надеемся, стрижка принесла удовольствие и отличный настрой. "
-                    "Пожалуйста, оцени качество визита от 1 до 5 звёзд:"
+                    "Надеемся, стрижка принесла удовольствие и отличный настрой! 💈\n"
+                    "Пожалуйста, оцени качество визита от 1 до 5 звёзд ниже.\n\n"
+                    "📅 Хочешь сразу запланировать следующий визит?\n"
+                    "Чтобы зафиксировать удобный день и время заранее, нажми «✂️ Записаться на следующий визит»:"
                 )
                 try:
                     await api.messages.send(

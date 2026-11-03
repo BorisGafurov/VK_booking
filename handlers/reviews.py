@@ -194,8 +194,12 @@ async def handle_vk_review_comment(message: Message):
         return
 
     user_pending_review.pop(user_id, None)
+    next_booking_kb = Keyboard(inline=True)
+    next_booking_kb.add(Callback("✂️ Записаться на следующий визит", {"cmd": "book_services"}))
     await message.answer(
         "🎉 Спасибо за твой отзыв!\n\n"
         "Он успешно сохранён и опубликован на нашем сайте srezforma.ru в разделе «Отзывы».\n\n"
-        "Будем рады видеть тебя снова! 💈"
+        "Будем рады видеть тебя снова! 💈\n"
+        "Ты можешь сразу выбрать удобное время на следующий визит:",
+        keyboard=next_booking_kb.get_json(),
     )
