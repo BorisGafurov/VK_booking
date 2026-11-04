@@ -5,7 +5,7 @@ import datetime
 import logging
 import secrets
 
-from vkbottle import GroupEventType, Keyboard, OpenLink
+from vkbottle import Callback, GroupEventType, Keyboard, OpenLink
 from vkbottle.bot import BotLabeler, Message, MessageEvent
 
 from config import ADMIN_IDS, SALON_ADDRESS
