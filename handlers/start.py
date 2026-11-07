@@ -78,12 +78,16 @@ async def start_handler(message: Message):
     last_name = user_info.last_name if user_info else ""
     domain = user_info.domain if user_info else None
 
-    user_db_id, is_new = save_user(
-        vk_id=message.from_id,
-        domain=domain,
-        first_name=first_name,
-        last_name=last_name,
-    )
+    user_db_id, is_new = None, False
+    try:
+        user_db_id, is_new = save_user(
+            vk_id=message.from_id,
+            domain=domain,
+            first_name=first_name,
+            last_name=last_name,
+        )
+    except Exception as e:
+        logger.error("Failed to save user in start handler: %s", e)
 
     greeting_name = f", {first_name}" if first_name else ""
     text = f"Привет{greeting_name}! Выбери нужный раздел:"
